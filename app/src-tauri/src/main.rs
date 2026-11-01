@@ -18,6 +18,16 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use voicekey_core::QwenEngine;
 use voicekey_remote::Handle as RemoteHandle;
 
+/// 手机接入的当前状态，喂给「手机接入」页展示
+#[derive(Clone)]
+pub struct RemoteStatus {
+    /// starting | ready | failed
+    pub state: &'static str,
+    pub error: Option<String>,
+    /// 隧道没起来，只有本机地址可用——手机连不上，要在页面上讲清楚
+    pub lan_only: bool,
+}
+
 pub struct AppState {
     pub settings: Arc<RwLock<Settings>>,
     pub tx: UnboundedSender<Msg>,
@@ -27,6 +37,7 @@ pub struct AppState {
     /// 手机接入服务起来之后才有值
     pub remote: Arc<RwLock<Option<RemoteHandle>>>,
     pub remote_url: Arc<RwLock<Option<String>>>,
+    pub remote_status: Arc<RwLock<RemoteStatus>>,
 }
 
 fn apply<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
@@ -97,14 +108,21 @@ fn get_state(app: AppHandle) -> serde_json::Value {
     let st = app.state::<AppState>();
     let s = st.settings.read().unwrap().clone();
     let url = st.remote_url.read().unwrap().clone();
+    let rs = st.remote_status.read().unwrap().clone();
     json!({
         "settings": s,
-        "platform": if cfg!(target_os = "macos") { "mac" } else { "win" },
+        "platform": "win",
         "version": app.package_info().version.to_string(),
         "channels": Channel::available(),
         "models": { "wetypeoffline": wtoffline::status() },
         "paused": st.paused.load(Ordering::Relaxed),
-        "remote": { "url": url, "qr": url.as_deref().and_then(qr_svg) },
+        "remote": {
+            "url": url,
+            "qr": url.as_deref().and_then(qr_svg),
+            "state": rs.state,
+            "error": rs.error,
+            "lanOnly": rs.lan_only,
+        },
         "update": update::status(),
     })
 }
@@ -129,8 +147,7 @@ fn set_paused(app: AppHandle, on: bool) {
 
 #[tauri::command]
 fn open_url(url: String) {
-    let cmd = if cfg!(target_os = "macos") { "open" } else { "explorer" };
-    let _ = std::process::Command::new(cmd).arg(url).spawn();
+    let _ = std::process::Command::new("explorer").arg(url).spawn();
 }
 
 #[tauri::command]
@@ -154,8 +171,6 @@ fn main() {
             get_state, set_settings, model_download, set_paused, open_url, update_check, update_install
         ])
         .setup(move |app| {
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let (tx, rx) = mpsc::unbounded_channel();
             let qwen = Arc::new(QwenEngine::default());
             let remote_url = Arc::new(RwLock::new(None));
@@ -166,6 +181,11 @@ fn main() {
                 paused: AtomicBool::new(false),
                 remote: Arc::new(RwLock::new(None)),
                 remote_url: remote_url.clone(),
+                remote_status: Arc::new(RwLock::new(RemoteStatus {
+                    state: "starting",
+                    error: None,
+                    lan_only: false,
+                })),
             });
 
             let handle = app.handle().clone();
@@ -188,8 +208,6 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("failed to build app")
         .run(|_app, e| match e {
-            #[cfg(target_os = "macos")]
-            RunEvent::Reopen { .. } => ui::show_settings(_app),
             RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
             _ => {}
         });

@@ -4,13 +4,24 @@
 //! 所以拿到地址后要立刻告诉前端刷新二维码。
 
 use crate::controller::Msg;
-use crate::AppState;
+use crate::{AppState, RemoteStatus};
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 use voicekey_remote::{Config, Event, Service};
 
 /// 固定端口：二维码里带的就是它，改了这个值等于换了接入点
 pub const PORT: u16 = 47800;
+
+/// 更新状态并通知前端刷新。event 数据只带状态本身，详情让前端拉 get_state
+fn set_status(app: &AppHandle, status: RemoteStatus) {
+    let payload = serde_json::json!({
+        "state": status.state,
+        "error": status.error,
+        "lanOnly": status.lan_only,
+    });
+    app.state::<AppState>().remote_status.write().unwrap().clone_from(&status);
+    let _ = app.emit("remote", payload);
+}
 
 pub fn spawn(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
@@ -19,7 +30,7 @@ pub fn spawn(app: AppHandle) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("手机接入启动失败：{e}");
-                let _ = app.emit("remote", serde_json::json!({ "state": "failed", "error": e }));
+                set_status(&app, RemoteStatus { state: "failed", error: Some(e), lan_only: false });
                 return;
             }
         };
@@ -27,12 +38,16 @@ pub fn spawn(app: AppHandle) {
         let url = service.url();
         // 只打域名，不打带 token 的完整地址：控制台截图、日志上报都会把它带出去
         eprintln!("手机接入已就绪：{}", service.origin());
+        let lan_only = service.origin().starts_with("http://127.0.0.1");
+        if lan_only {
+            eprintln!("隧道不可用：手机与电脑不在同一局域网时将无法连接");
+        }
         {
             let st = app.state::<AppState>();
             *st.remote.write().unwrap() = Some(service.handle());
             *st.remote_url.write().unwrap() = Some(url);
         }
-        let _ = app.emit("remote", serde_json::json!({ "state": "ready" }));
+        set_status(&app, RemoteStatus { state: "ready", error: None, lan_only });
 
         while let Some(event) = service.next_event().await {
             // 音频只在按下这一刻取：取早了是上一句的，取晚了会被下一句覆盖

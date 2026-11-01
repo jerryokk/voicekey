@@ -19,11 +19,23 @@
 <h2>手机接入</h2>
 <div class="sub">手机扫码打开页面，按住说话，识别结果会打进电脑当前的输入框。</div>
 
-{#if remote.qr}
+{#if remote.qr && !remote.lanOnly}
   <div class="qr">{@html remote.qr}</div>
   <div class="urlrow">
     <code>{remote.url}</code>
     <button class="btn" onclick={copy}>{copied ? "已复制" : "复制"}</button>
+  </div>
+{:else if remote.state === "failed" || remote.lanOnly}
+  <div class="fail">
+    <div class="fail-title">{remote.lanOnly ? "公网隧道没有建立" : "手机接入启动失败"}</div>
+    <p>
+      {#if remote.lanOnly}
+        可能是网络连不上 Cloudflare（部分企业网、代理会拦截）。检查网络后重启应用再试；
+        电脑与手机在同一局域网时也可以用局域网地址，但手机浏览器要求 https，通常仍需要隧道。
+      {:else}
+        {remote.error || "未知错误"}。修复后重启应用即可重试。
+      {/if}
+    </p>
   </div>
 {:else}
   <div class="pending">
@@ -56,6 +68,9 @@
   .pending { display: flex; align-items: center; gap: 10px; color: var(--fg2); font-size: 13px; padding: 24px 0; }
   .spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent); animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  .fail { padding: 18px; background: #fdf3f0; border: 1px solid #eccfc5; border-radius: 14px; }
+  .fail-title { font-size: 13.5px; font-weight: 600; color: #a04424; margin-bottom: 6px; }
+  .fail p { margin: 0; font-size: 12.5px; color: #8a6255; line-height: 1.7; }
   .tips p { margin: 0 0 8px; font-size: 12.5px; color: var(--fg2); line-height: 1.7; }
   .tips .warn { color: var(--fg3); }
 </style>
