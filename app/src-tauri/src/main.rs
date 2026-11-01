@@ -1,4 +1,5 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// GUI 子系统：双击 exe 不带出黑色控制台；从终端启动时 stderr 日志仍写入该终端
+#![windows_subsystem = "windows"]
 
 mod controller;
 mod remote;
@@ -159,7 +160,10 @@ fn main() {
     let settings = Settings::load();
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| ui::show_settings(app)))
-        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--minimized"]),
+        ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_state, set_settings, model_download, set_paused, update_check, update_install
@@ -188,7 +192,11 @@ fn main() {
             ui::create_overlays(&handle)?;
             ui::build_tray(&handle, &settings)?;
             apply(&handle, &settings);
-            // 托盘应用，安静启动；入口在托盘图标（设置 / 暂停 / 退出）
+            // 手动双击 exe：弹出设置窗（用户是特意来操作的）；
+            // 开机自启动带 --minimized 参数，保持安静，入口在托盘
+            if !std::env::args().any(|a| a == "--minimized") {
+                ui::show_settings(&handle);
+            }
             update::schedule(&handle);
             Ok(())
         })
