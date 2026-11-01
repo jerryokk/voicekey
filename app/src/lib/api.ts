@@ -8,28 +8,38 @@ import sogou from "../assets/logos/sogou.png";
 import iflytek from "../assets/logos/iflytek.png";
 import chatterfly from "../assets/logos/chatterfly.png";
 
-export type Channel = "doubao" | "wetype" | "qwen" | "baidu" | "sogou" | "iflytek" | "chatterfly" | "offline" | "wetypeoffline" | "all";
-export interface Shortcut { code: number; mods: number; name: string }
-export interface Combo { codes: number[]; name: string }
+export type Channel =
+  | "doubao" | "wetype" | "qwen" | "baidu" | "sogou" | "iflytek" | "chatterfly" | "wetypeoffline" | "all";
+
 export interface Settings {
-  channel: Channel; holdKey: string; holdCombo: Combo | null; tapShortcut: Shortcut | null; silence: number; silenceStop: boolean; streaming: boolean;
-  liveText: boolean; mic: string; multi: Channel[]; lastPick: Channel | null; pickCounts: Partial<Record<Channel, number>>; autostart: boolean; theme: string; onboarded: boolean;
+  channel: Channel;
+  streaming: boolean;
+  liveText: boolean;
+  multi: Channel[];
+  lastPick: Channel | null;
+  pickCounts: Partial<Record<Channel, number>>;
+  autostart: boolean;
+  theme: string;
+  onboarded: boolean;
 }
+
 export interface OfflineStatus { state: "missing" | "downloading" | "ready" | "failed"; progress?: number; error?: string }
-export interface Perms { accessibility: boolean; mic: "granted" | "denied" | "undetermined" }
 export interface UpdateStatus { state: "idle" | "checking" | "latest" | "available" | "downloading" | "error"; version?: string; progress?: number; error?: string }
+
+/** 手机接入：地址要等隧道就绪才有，二维码由后端生成成 SVG */
+export interface Remote { url: string | null; qr: string | null; state?: "starting" | "ready" | "failed"; error?: string }
+
 export interface AppInfo {
-  settings: Settings; platform: "mac" | "win"; arch: string; version: string;
-  holdKeys: { id: string; name: string }[]; channels: Channel[];
-  offline: { supported: boolean }; models: Partial<Record<Channel, OfflineStatus>>; perms: Perms; update: UpdateStatus;
+  settings: Settings; platform: "mac" | "win"; version: string; channels: Channel[];
+  models: Partial<Record<Channel, OfflineStatus>>;
+  paused: boolean; remote: Remote; update: UpdateStatus;
 }
+
 export type RowState = "listen" | "wait" | "final" | "error" | "skip";
 export interface Row { channel: Channel; text: string; state: RowState; ms: number | null }
-export interface Model { recording: boolean; rows: Row[]; sel: number }
+export interface Model { recording: boolean; rows: Row[]; sel: number; text: string }
 
 export const call = invoke;
-export const holdName = (s: Settings, keys: AppInfo["holdKeys"]) =>
-  s.holdKey === "custom" ? (s.holdCombo?.name ?? "") : (keys.find((k) => k.id === s.holdKey)?.name ?? "");
 export const on = <T>(name: string, f: (p: T) => void): Promise<UnlistenFn> => listen<T>(name, (e) => f(e.payload));
 
 export const CH: Record<Channel, { name: string; short: string; desc: string; tags: string[]; logo: string }> = {
@@ -40,13 +50,12 @@ export const CH: Record<Channel, { name: string; short: string; desc: string; ta
   sogou: { name: "搜狗输入法", short: "搜狗", desc: "搜狗输入法官方云端识别，中文流式出字。", tags: ["在线", "流式"], logo: sogou },
   iflytek: { name: "讯飞输入法", short: "讯飞", desc: "讯飞输入法官方云端识别，中文流式出字。", tags: ["在线", "流式"], logo: iflytek },
   chatterfly: { name: "Chatterfly", short: "Chatterfly", desc: "Chatterfly 官方云端识别，中文流式出字。", tags: ["在线", "流式"], logo: chatterfly },
-  offline: { name: "豆包离线", short: "豆包离线", desc: "豆包输入法离线引擎，本机运行，断网可用，不上传音频。", tags: ["离线", "约 190MB"], logo: doubao },
   wetypeoffline: { name: "微信离线", short: "微信离线", desc: "微信输入法官方离线模型，本机运行，断网可用，不上传音频。", tags: ["离线", "约 100MB"], logo: wetype },
-  all: { name: "多渠道", short: "多渠道", desc: "勾选的渠道同时识别、实时出字，说完在光标处挑选最满意的一条上屏。", tags: ["并行", "流式候选"], logo: "" },
+  all: { name: "多渠道", short: "多渠道", desc: "勾选的渠道同时识别、实时出字，说完在手机上挑一条上屏。", tags: ["并行", "流式候选"], logo: "" },
 };
 
 /** 需要下载模型的本地渠道及下载体积 */
-export const LOCAL: Partial<Record<Channel, string>> = { offline: "约 190MB", wetypeoffline: "约 100MB" };
+export const LOCAL: Partial<Record<Channel, string>> = { wetypeoffline: "约 100MB" };
 
 /** 根据平台与主题设置 html class */
 export function applyLook(platform: string, theme: string) {
@@ -59,18 +68,4 @@ export function applyLook(platform: string, theme: string) {
 
 export function esc(s: string) {
   return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!);
-}
-
-/** 定稿与中间结果比对，标出新增/改动的字 */
-export function diffMark(a: string, b: string): string {
-  const A = [...a], B = [...b], n = A.length, m = B.length;
-  const d = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
-  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
-    d[i][j] = A[i] === B[j] ? d[i + 1][j + 1] + 1 : Math.max(d[i + 1][j], d[i][j + 1]);
-  const keep = new Set<number>();
-  let i = 0, j = 0;
-  while (i < n && j < m) {
-    if (A[i] === B[j]) { keep.add(j); i++; j++; } else if (d[i + 1][j] >= d[i][j + 1]) i++; else j++;
-  }
-  return B.map((c, k) => (keep.has(k) || /[，。、,. ]/.test(c) ? esc(c) : `<span class="chg">${esc(c)}</span>`)).join("");
 }

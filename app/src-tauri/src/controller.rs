@@ -1,33 +1,32 @@
-//! 会话编排：快捷键 → 录音 → 识别 → 上屏；「全部」模式流式候选面板；设置页渠道对比
-use crate::hotkey::{HotEvent, Shared};
+//! 会话编排：手机按下 → 音频流 → 识别 → 上屏。
+//!
+//! 状态机本身没变（Mode / gen / Segments / 超时 / 33ms 节流都是原来那套），
+//! 变的只是「谁开始一句话」：以前是全局快捷键加电脑麦克风，现在是手机端的 Press/Release，
+//! 音频由 `voicekey-remote` 交过来。用户松手就是结束，所以静音自动结束那套判定没有了。
 use crate::settings::{Channel, Settings};
-use crate::{offline, ui, wtoffline, AppState};
+use crate::ui;
+use crate::AppState;
 use serde::Serialize;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
+use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use tauri::async_runtime::JoinHandle;
-use voicekey_core::audio::Recorder;
-use voicekey_core::{BaiduEngine, ChatterflyEngine, DoubaoEngine, Engine, IflyEngine, QwenEngine, SogouEngine, WeTypeEngine};
-use voicekey_platform::{self as pf, Special, Typer};
+use voicekey_core::{
+    Audio, BaiduEngine, ChatterflyEngine, DoubaoEngine, Engine, IflyEngine, QwenEngine, SogouEngine, WeTypeEngine,
+};
+use voicekey_platform::{self as pf, Typer};
+use voicekey_remote::{Event as RemoteEvent, Handle as RemoteHandle};
 
 pub enum Msg {
-    Hot(HotEvent),
-    Level(f32),
+    /// 手机端事件，Press 时附带本句的音频流
+    Remote(RemoteEvent, Option<Audio>),
     Partial { gen: u64, ch: Channel, seg: usize, text: String },
     Done { gen: u64, ch: Channel, seg: usize, res: Result<String, String> },
     Timeout { token: u64 },
     Flush,
-    PickChoose(usize),
-    PickKey(Special),
-    CompareToggle,
-    CompareStop,
-    Meter(bool),
-    RefreshMeter,
-    MicrophonesChanged(Vec<String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Debug)]
@@ -53,6 +52,8 @@ struct Model<'a> {
     recording: bool,
     rows: &'a [Row],
     sel: usize,
+    /// 单渠道模式下这一句的实时文字（多渠道走 rows）
+    text: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -60,7 +61,6 @@ enum Mode {
     Idle,
     Single(Channel),
     Pick,
-    Compare,
 }
 
 /// 单渠道会话的分段：识别中再触发继续说，各段结果按顺序拼成一句
@@ -118,47 +118,25 @@ impl Segments {
 pub struct Ctl {
     app: AppHandle,
     settings: Arc<RwLock<Settings>>,
-    hk: Arc<Shared>,
     tx: UnboundedSender<Msg>,
+    remote: Arc<RwLock<Option<RemoteHandle>>>,
     engines: HashMap<Channel, Arc<dyn Engine>>,
-    recorder: Option<Recorder>,
-    meter: Option<Recorder>,
-    meter_enabled: bool,
     tasks: Vec<JoinHandle<()>>,
     gen: u64,
     timeout_token: u64,
     mode: Mode,
+    /// 手机正按着
     recording: bool,
-    auto_stop: bool,
-    heard_voice: bool,
-    last_voice: Instant,
     typer: Option<Typer>,
     segs: Segments,
     rows: Vec<Row>,
     row_segs: Vec<Segments>,
     sel: usize,
     user_picked: bool,
-    choose_pending: bool,
-    released_at: Option<Instant>,
-    front: Option<pf::FrontApp>,
     last_emit: Instant,
     flush_pending: bool,
-    /// 按下到判定长按之间已经打开的麦克风，确认开始后把这段音频交出去
-    primed: Option<Primed>,
+    released_at: Option<Instant>,
 }
-
-/// 预开麦：先环形缓存，确认录音后转成实时帧流
-struct Primed {
-    recorder: Recorder,
-    gate: Arc<Mutex<Gate>>,
-}
-
-enum Gate {
-    Buffer(VecDeque<Vec<i16>>),
-    Forward(UnboundedSender<Vec<i16>>),
-}
-
-const PREROLL: usize = 50;
 
 pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) {
     let st = app.state::<AppState>();
@@ -170,63 +148,35 @@ pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) 
     engines.insert(Channel::Sogou, Arc::new(SogouEngine));
     engines.insert(Channel::Iflytek, Arc::new(IflyEngine));
     engines.insert(Channel::Chatterfly, Arc::new(ChatterflyEngine));
-    if let Some(e) = offline::engine() {
-        engines.insert(Channel::Offline, e);
-    }
-    engines.insert(Channel::WetypeOffline, wtoffline::engine());
+    engines.insert(Channel::WetypeOffline, crate::wtoffline::engine());
     let ctl = Ctl {
         settings: st.settings.clone(),
-        hk: st.hk.clone(),
+        remote: st.remote.clone(),
         tx: st.tx.clone(),
         app: app.clone(),
         engines,
-        recorder: None,
-        meter: None,
-        meter_enabled: false,
         tasks: Vec::new(),
         gen: 0,
         timeout_token: 0,
         mode: Mode::Idle,
         recording: false,
-        auto_stop: false,
-        heard_voice: false,
-        last_voice: Instant::now(),
         typer: None,
         segs: Segments::default(),
         rows: Vec::new(),
         row_segs: Vec::new(),
         sel: 0,
         user_picked: false,
-        choose_pending: false,
-        released_at: None,
-        front: None,
         last_emit: Instant::now(),
         flush_pending: false,
-        primed: None,
+        released_at: None,
     };
     tauri::async_runtime::spawn(ctl.run(rx));
 }
 
 impl Ctl {
     async fn run(mut self, mut rx: UnboundedReceiver<Msg>) {
-        let mut retry = tokio::time::interval(Duration::from_secs(2));
-        loop {
-            tokio::select! {
-                m = rx.recv() => {
-                    let Some(m) = m else { break };
-                    let was_idle = self.mode == Mode::Idle;
-                    self.handle(m);
-                    if !was_idle && self.mode == Mode::Idle {
-                        self.refresh_meter();
-                    }
-                }
-                _ = retry.tick() => {
-                    // 驱动可能先公布输入通道，稍后才允许打开；只重试用户正在看的电平表。
-                    if self.meter_enabled && self.mode == Mode::Idle && self.meter.is_none() {
-                        self.refresh_meter();
-                    }
-                }
-            }
+        while let Some(m) = rx.recv().await {
+            self.handle(m);
         }
     }
 
@@ -234,13 +184,15 @@ impl Ctl {
         self.settings.read().unwrap().clone()
     }
 
+    fn publish(&self, value: serde_json::Value) {
+        if let Some(h) = self.remote.read().unwrap().as_ref() {
+            h.publish(value);
+        }
+    }
+
     fn handle(&mut self, m: Msg) {
         match m {
-            Msg::Hot(e) => self.hot(e),
-            Msg::Level(v) => {
-                let _ = self.app.emit("level", v);
-                self.check_silence(v);
-            }
+            Msg::Remote(e, audio) => self.remote_event(e, audio),
             Msg::Partial { gen, ch, seg, text } if gen == self.gen => self.partial(ch, seg, text),
             Msg::Done { gen, ch, seg, res } if gen == self.gen => self.done(ch, seg, res),
             Msg::Timeout { token } if token == self.timeout_token && self.mode != Mode::Idle => {
@@ -250,100 +202,47 @@ impl Ctl {
                 self.flush_pending = false;
                 self.emit_rows();
             }
-            Msg::PickChoose(i) if self.mode == Mode::Pick => self.choose(i),
-            Msg::PickKey(k) if self.mode == Mode::Pick => self.pick_key(k),
-            Msg::CompareToggle => match self.mode {
-                Mode::Compare if self.recording => self.end(),
-                Mode::Idle => self.begin_multi(Mode::Compare, Channel::engines(), false),
-                _ => {}
-            },
-            Msg::CompareStop if self.mode == Mode::Compare => self.abort(None),
-            Msg::Meter(on) => {
-                self.meter_enabled = on;
-                self.refresh_meter();
-            }
-            Msg::RefreshMeter => self.refresh_meter(),
-            Msg::MicrophonesChanged(mics) => {
-                let _ = self.app.emit("microphones", mics);
-                self.refresh_meter();
-            }
             _ => {}
         }
     }
 
-    fn refresh_meter(&mut self) {
-        if self.mode != Mode::Idle {
+    fn remote_event(&mut self, e: RemoteEvent, audio: Option<Audio>) {
+        // 托盘里「暂停监听」时，手机怎么按都不响应
+        if self.app.state::<AppState>().paused.load(Ordering::Relaxed) {
             return;
         }
-        self.meter = None;
-        let _ = self.app.emit("level", 0.0f32);
-        if self.meter_enabled {
-            let tx = self.tx.clone();
-            let mic = self.settings().mic;
-            self.meter = Recorder::start(Some(&mic), move |v| {
-                let _ = tx.send(Msg::Level(v));
-            })
-            .ok()
-            .map(|(r, _)| r);
+        match e {
+            RemoteEvent::Press => self.press(audio),
+            RemoteEvent::Release => self.release(),
+            RemoteEvent::Abort(reason) => {
+                if self.mode != Mode::Idle {
+                    self.abort(Some(reason))
+                }
+            }
+            RemoteEvent::Commit(channel) => self.commit(&channel),
+            // 说到一半不给删：流式打字机记着已打的字数，外部退格会让它失准
+            RemoteEvent::Erase(n) if !self.recording => pf::backspace(n as usize),
+            RemoteEvent::Erase(_) => {}
         }
     }
 
-    fn hot(&mut self, e: HotEvent) {
-        match e {
-            HotEvent::Press => {
-                if !self.recording && self.mode == Mode::Idle {
-                    self.prewarm();
-                    self.arm();
-                } else if !self.recording && matches!(self.mode, Mode::Single(_) | Mode::Pick) {
-                    self.arm();
-                }
-            }
-            HotEvent::Cancel => self.disarm(),
-            HotEvent::LongPress => match self.mode {
-                Mode::Single(_) | Mode::Pick => self.resume(false),
-                _ => self.begin(false),
-            },
-            HotEvent::Release => {
-                if !self.auto_stop && self.mode != Mode::Compare {
-                    self.end()
-                }
-            }
-            HotEvent::Tap => {
-                if self.mode == Mode::Compare {
-                    return;
-                }
-                if self.recording {
-                    self.end()
-                } else if matches!(self.mode, Mode::Single(_) | Mode::Pick) {
-                    self.resume(true)
-                } else if self.mode != Mode::Idle {
-                    self.abort(None)
+    fn press(&mut self, audio: Option<Audio>) {
+        let Some(audio) = audio else {
+            ui::hud_error(&self.app, "没有收到音频");
+            return;
+        };
+        match self.mode {
+            Mode::Idle => {
+                self.prewarm();
+                let s = self.settings();
+                if s.channel == Channel::All {
+                    self.begin_multi(s.multi, audio);
                 } else {
-                    self.begin(true)
+                    self.begin_single(s.channel, audio);
                 }
             }
-            HotEvent::Escape => {
-                if matches!(self.mode, Mode::Single(_) | Mode::Pick) {
-                    self.abort(None)
-                }
-            }
-            HotEvent::Pick(k) if self.mode == Mode::Pick => self.pick_key(k),
-            HotEvent::Pick(_) => {}
-            HotEvent::Recorded(sc) => {
-                let _ = self.app.emit_to("main", "recorded", sc.clone());
-                if let Some(sc) = sc {
-                    crate::update_settings(&self.app, |s| s.tap_shortcut = Some(sc));
-                }
-            }
-            HotEvent::RecordedHold(c) => {
-                let _ = self.app.emit_to("main", "recorded", c.is_some());
-                if let Some(c) = c {
-                    crate::update_settings(&self.app, |s| {
-                        s.hold_key = crate::settings::CUSTOM_HOLD.into();
-                        s.hold_combo = Some(c);
-                    });
-                }
-            }
+            // 上一句还在定稿或候选里：接着说，结果接在后面
+            Mode::Single(_) | Mode::Pick => self.resume(audio),
         }
     }
 
@@ -357,189 +256,25 @@ impl Ctl {
         }
     }
 
-    fn start_recorder(&mut self) -> Option<voicekey_core::Audio> {
-        self.meter = None;
-        if let Some(audio) = self.take_primed() {
-            return Some(audio);
-        }
-        let tx = self.tx.clone();
-        let mic = self.settings().mic;
-        match Recorder::start(Some(&mic), move |v| {
-            let _ = tx.send(Msg::Level(v));
-        }) {
-            Ok((r, audio)) => {
-                self.recorder = Some(r);
-                self.recording = true;
-                self.heard_voice = false;
-                self.last_voice = Instant::now();
-                ui::set_tray_active(&self.app, true);
-                Some(audio)
-            }
-            Err(e) => {
-                ui::hud_error(&self.app, &format!("{e:#}"));
-                None
-            }
-        }
-    }
-
-    /// 快捷键按下即开麦。短按取消或被别的键打断时关掉
-    fn arm(&mut self) {
-        if self.primed.is_some() || self.recording {
-            return;
-        }
-        self.meter = None;
-        let tx = self.tx.clone();
-        let mic = self.settings().mic;
-        let Ok((recorder, mut audio)) = Recorder::start(Some(&mic), move |v| {
-            let _ = tx.send(Msg::Level(v));
-        }) else {
-            if self.mode == Mode::Idle {
-                self.refresh_meter();
-            }
-            return;
-        };
-        let gate = Arc::new(Mutex::new(Gate::Buffer(VecDeque::new())));
-        let shared = gate.clone();
-        tauri::async_runtime::spawn(async move {
-            while let Some(frame) = audio.recv().await {
-                let mut gate = shared.lock().unwrap();
-                match &mut *gate {
-                    Gate::Buffer(q) => {
-                        q.push_back(frame);
-                        while q.len() > PREROLL {
-                            q.pop_front();
-                        }
-                    }
-                    Gate::Forward(tx) => {
-                        if tx.send(frame).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-        self.primed = Some(Primed { recorder, gate });
-    }
-
-    fn disarm(&mut self) {
-        if self.recording {
-            return;
-        }
-        self.primed = None;
-        if self.mode == Mode::Idle {
-            self.refresh_meter();
-        }
-    }
-
-    fn take_primed(&mut self) -> Option<voicekey_core::Audio> {
-        let primed = self.primed.take()?;
-        let (tx, rx) = mpsc::unbounded_channel();
-        {
-            let mut gate = primed.gate.lock().unwrap();
-            if let Gate::Buffer(q) = &mut *gate {
-                for frame in q.drain(..) {
-                    let _ = tx.send(frame);
-                }
-            }
-            *gate = Gate::Forward(tx);
-        }
-        self.recorder = Some(primed.recorder);
-        self.recording = true;
-        self.heard_voice = false;
-        self.last_voice = Instant::now();
-        ui::set_tray_active(&self.app, true);
-        Some(rx)
-    }
-
-    fn stop_recording(&mut self) {
-        if !self.recording {
-            return;
-        }
-        self.recording = false;
-        self.auto_stop = false;
-        if let Some(mut r) = self.recorder.take() {
-            r.stop();
-        }
-        ui::set_tray_active(&self.app, false);
-    }
-
-    fn spawn_engine(&mut self, ch: Channel, seg: usize, audio: voicekey_core::Audio) {
-        let Some(engine) = self.engines.get(&ch).cloned() else { return };
-        let (gen, tx) = (self.gen, self.tx.clone());
-        self.tasks.push(tauri::async_runtime::spawn(async move {
-            let ptx = tx.clone();
-            let partial = Box::new(move |t: &str| {
-                let _ = ptx.send(Msg::Partial { gen, ch, seg, text: t.to_string() });
-            });
-            let res = engine.run(audio, partial).await.map_err(|e| format!("{e:#}"));
-            let _ = tx.send(Msg::Done { gen, ch, seg, res });
-        }));
-    }
-
-    fn begin(&mut self, auto_stop: bool) {
-        if self.mode != Mode::Idle {
-            return;
-        }
-        let s = self.settings();
-        if s.channel == Channel::All {
-            return self.begin_multi(Mode::Pick, s.multi, auto_stop);
-        }
-        let Some(audio) = self.start_recorder() else { return };
-        self.auto_stop = auto_stop;
+    fn begin_single(&mut self, ch: Channel, audio: Audio) {
         self.gen += 1;
-        self.mode = Mode::Single(s.channel);
-        self.typer = s.streaming.then(Typer::default);
+        self.mode = Mode::Single(ch);
+        self.recording = true;
+        self.typer = self.settings().streaming.then(Typer::default);
         self.segs = Segments::default();
         let seg = self.segs.start();
-        ui::hud(&self.app, "listen", "", s.channel);
-        self.spawn_engine(s.channel, seg, audio);
+        ui::hud(&self.app, "listen", "", ch);
+        self.spawn_engine(ch, seg, audio);
     }
 
-    /// 识别中或候选框未关时再触发：新开一段录音，结果接在前面几段后面
-    fn resume(&mut self, auto_stop: bool) {
-        if self.recording || !matches!(self.mode, Mode::Single(_) | Mode::Pick) {
-            return;
-        }
-        let Some(audio) = self.start_recorder() else { return };
-        self.auto_stop = auto_stop;
-        self.timeout_token += 1;
-        if let Mode::Single(ch) = self.mode {
-            let seg = self.segs.start();
-            self.hud_single(ch);
-            return self.spawn_engine(ch, seg, audio);
-        }
-        self.released_at = None;
-        self.choose_pending = false;
-        let mut targets = Vec::new();
-        for (r, segs) in self.rows.iter_mut().zip(&mut self.row_segs) {
-            if r.state == RowState::Skip {
-                continue;
-            }
-            targets.push((r.channel, segs.start()));
-            r.state = RowState::Listen;
-            r.text = segs.text();
-        }
-        self.fan_out(audio, targets);
-        self.emit_rows();
-    }
-
-    fn hud_single(&self, ch: Channel) {
-        let text = if self.settings.read().unwrap().live_text { self.segs.text() } else { String::new() };
-        ui::hud(&self.app, if self.recording { "listen" } else { "wait" }, &text, ch);
-    }
-
-    fn begin_multi(&mut self, mode: Mode, mut channels: Vec<Channel>, auto_stop: bool) {
-        let Some(audio) = self.start_recorder() else { return };
-        if mode == Mode::Pick {
-            let n = self.settings().pick_counts;
-            channels.sort_by_key(|c| std::cmp::Reverse(n.get(c).copied().unwrap_or(0)));
-        }
-        self.auto_stop = auto_stop;
+    fn begin_multi(&mut self, mut channels: Vec<Channel>, audio: Audio) {
+        let n = self.settings().pick_counts;
+        channels.sort_by_key(|c| std::cmp::Reverse(n.get(&c).copied().unwrap_or(0)));
         self.gen += 1;
-        self.mode = mode;
+        self.mode = Mode::Pick;
+        self.recording = true;
         self.sel = 0;
         self.user_picked = false;
-        self.choose_pending = false;
         self.released_at = None;
         self.rows = channels
             .into_iter()
@@ -562,21 +297,47 @@ impl Ctl {
             .map(|(r, segs)| (r.channel, segs.start()))
             .collect();
         self.fan_out(audio, targets);
-        if mode == Mode::Pick {
-            let last = self.settings().last_pick;
-            if let Some(i) = self.rows.iter().position(|r| Some(r.channel) == last && r.state == RowState::Listen) {
-                self.sel = i;
-                self.user_picked = true;
-            }
-            self.front = pf::front_app();
-            self.hk.picking.store(true, Ordering::Relaxed);
-            // 安全输入下钩子收不到方向键/数字：改为让面板取得焦点自己接收按键
-            ui::pick_show(&self.app, pf::caret(), self.rows.len(), pf::secure_input());
+        // 默认选中上次用的渠道
+        let last = self.settings().last_pick;
+        if let Some(i) = self.rows.iter().position(|r| Some(r.channel) == last && r.state == RowState::Listen) {
+            self.sel = i;
+            self.user_picked = true;
         }
         self.emit_rows();
     }
 
-    fn fan_out(&mut self, mut audio: voicekey_core::Audio, targets: Vec<(Channel, usize)>) {
+    /// 识别中或候选未消失时再按：新开一段，结果接在前面几段后面
+    fn resume(&mut self, audio: Audio) {
+        if self.recording {
+            return;
+        }
+        self.recording = true;
+        self.timeout_token += 1;
+        if let Mode::Single(ch) = self.mode {
+            let seg = self.segs.start();
+            self.hud_single(ch);
+            return self.spawn_engine(ch, seg, audio);
+        }
+        self.released_at = None;
+        let mut targets = Vec::new();
+        for (r, segs) in self.rows.iter_mut().zip(&mut self.row_segs) {
+            if r.state == RowState::Skip {
+                continue;
+            }
+            targets.push((r.channel, segs.start()));
+            r.state = RowState::Listen;
+            r.text = segs.text();
+        }
+        self.fan_out(audio, targets);
+        self.emit_rows();
+    }
+
+    fn hud_single(&self, ch: Channel) {
+        let text = if self.settings.read().unwrap().live_text { self.segs.text() } else { String::new() };
+        ui::hud(&self.app, if self.recording { "listen" } else { "wait" }, &text, ch);
+    }
+
+    fn fan_out(&mut self, mut audio: Audio, targets: Vec<(Channel, usize)>) {
         let mut senders = Vec::new();
         for (ch, seg) in targets {
             let (t, r) = mpsc::unbounded_channel();
@@ -592,25 +353,38 @@ impl Ctl {
         }));
     }
 
+    fn spawn_engine(&mut self, ch: Channel, seg: usize, audio: Audio) {
+        let Some(engine) = self.engines.get(&ch).cloned() else { return };
+        let (gen, tx) = (self.gen, self.tx.clone());
+        self.tasks.push(tauri::async_runtime::spawn(async move {
+            let ptx = tx.clone();
+            let partial = Box::new(move |t: &str| {
+                let _ = ptx.send(Msg::Partial { gen, ch, seg, text: t.to_string() });
+            });
+            let res = engine.run(audio, partial).await.map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Msg::Done { gen, ch, seg, res });
+        }));
+    }
+
     fn partial(&mut self, ch: Channel, seg: usize, text: String) {
         match self.mode {
             Mode::Single(_) => {
                 let Some(changed) = self.segs.partial(seg, text) else { return };
-                if changed {
-                    self.speaking();
+                if !changed {
+                    return;
                 }
                 if let Some(t) = self.typer.as_mut() {
                     t.update(&self.segs.text());
                 }
+                let text = self.segs.text();
+                // 人盯着手机看，实时文字必须发到手机上去
+                self.publish(serde_json::json!({ "type": "partial", "text": text }));
                 self.hud_single(ch);
             }
-            Mode::Pick | Mode::Compare => {
+            Mode::Pick => {
                 if let Some(i) = self.rows.iter().position(|r| r.channel == ch) {
-                    if let Some(changed) = self.row_segs[i].partial(seg, text) {
+                    if self.row_segs[i].partial(seg, text).is_some() {
                         self.rows[i].text = self.row_segs[i].text();
-                        if changed {
-                            self.speaking();
-                        }
                     }
                 }
                 self.emit_rows();
@@ -630,7 +404,7 @@ impl Ctl {
                     }
                     return;
                 }
-                self.stop_recording();
+                self.recording = false;
                 self.timeout_token += 1;
                 self.tasks.clear();
                 self.mode = Mode::Idle;
@@ -653,18 +427,22 @@ impl Ctl {
                     } else {
                         format!("识别失败：{e}，已保留已识别的文字")
                     };
+                    self.publish(serde_json::json!({ "type": "error", "stage": "asr", "message": msg }));
                     ui::hud_error(&self.app, &msg);
                 } else if streamed {
                     ui::hud_hide(&self.app, 0);
+                    self.publish(serde_json::json!({ "type": "final", "text": text }));
                 } else if text.is_empty() {
                     ui::hud(&self.app, "info", "没有识别到内容", ch);
                     ui::hud_hide(&self.app, 1000);
+                    self.publish(serde_json::json!({ "type": "final", "text": "" }));
                 } else {
                     ui::hud_hide(&self.app, 0);
                     pf::paste(&text);
+                    self.publish(serde_json::json!({ "type": "final", "text": text }));
                 }
             }
-            Mode::Pick | Mode::Compare => {
+            Mode::Pick => {
                 let ms = self.released_at.map(|t| t.elapsed().as_millis() as u64);
                 let Some(i) = self.rows.iter().position(|r| r.channel == ch) else { return };
                 let segs = &mut self.row_segs[i];
@@ -686,23 +464,8 @@ impl Ctl {
                 if self.rows[i].state == RowState::Final && fallback && cur != RowState::Final {
                     self.sel = i;
                 }
-                let finished = !self.rows.iter().any(|r| matches!(r.state, RowState::Listen | RowState::Wait));
-                if self.choose_pending && matches!(self.rows[self.sel].state, RowState::Error | RowState::Skip) {
-                    if let Some(j) = self.rows.iter().position(|r| r.state == RowState::Final) {
-                        self.sel = j;
-                    }
-                }
-                if self.mode == Mode::Pick && self.choose_pending && self.rows[self.sel].state == RowState::Final {
-                    return self.choose(self.sel);
-                }
-                if finished {
-                    self.choose_pending = false;
+                if !self.rows.iter().any(|r| matches!(r.state, RowState::Listen | RowState::Wait)) {
                     self.timeout_token += 1;
-                    if self.mode == Mode::Compare {
-                        self.stop_recording();
-                        self.mode = Mode::Idle;
-                        self.tasks.clear();
-                    }
                 }
                 self.emit_rows();
             }
@@ -710,37 +473,16 @@ impl Ctl {
         }
     }
 
-    /// 说过话后静音超过设定时长即结束；一直没开口则 8 秒后放弃。设置里关闭后只能手动结束
-    fn check_silence(&mut self, level: f32) {
-        if !self.recording || !self.auto_stop || !self.settings.read().unwrap().silence_stop {
-            return;
-        }
-        if level > 0.3 {
-            self.speaking();
-        } else {
-            let limit = if self.heard_voice { self.settings().silence } else { 8.0 };
-            if self.last_voice.elapsed().as_secs_f64() > limit {
-                self.end();
-            }
-        }
-    }
-
-    /// 音量够大或识别文字仍在变化都算在说话：说话声小、离麦远时音量常低于阈值，单看音量会中途误判静音
-    fn speaking(&mut self) {
-        if self.recording {
-            self.heard_voice = true;
-            self.last_voice = Instant::now();
-        }
-    }
-
-    fn end(&mut self) {
+    /// 手机松手。音频流这时已经结束（服务端在发 Release 前就停了泵），
+    /// 所以这里只更新界面状态并开始等定稿。
+    fn release(&mut self) {
         if !self.recording {
             return;
         }
-        self.stop_recording();
+        self.recording = false;
         match self.mode {
             Mode::Single(ch) => ui::hud(&self.app, "wait", "", ch),
-            Mode::Pick | Mode::Compare => {
+            Mode::Pick => {
                 self.released_at = Some(Instant::now());
                 for r in &mut self.rows {
                     if r.state == RowState::Listen {
@@ -759,51 +501,28 @@ impl Ctl {
         });
     }
 
-    /// 打断：再按快捷键/Esc/超时；message 为 None 表示用户取消
+    /// 打断：定稿超时、手机断线
     fn abort(&mut self, message: Option<String>) {
         if self.mode == Mode::Idle {
             return;
         }
-        let mode = self.mode;
         let streamed = self.typer.is_some();
-        let partial = match mode {
+        let partial = match self.mode {
             Mode::Single(_) => self.segs.text(),
             Mode::Pick => self.rows.get(self.sel).map(|r| r.text.clone()).unwrap_or_default(),
-            Mode::Compare | Mode::Idle => String::new(),
+            Mode::Idle => String::new(),
         };
         self.cancel();
-        if mode == Mode::Pick {
-            if let Some(f) = self.front.take() {
-                f.activate();
-            }
-        }
-        if mode == Mode::Compare {
-            for r in &mut self.rows {
-                if matches!(r.state, RowState::Listen | RowState::Wait) {
-                    r.state = RowState::Error;
-                    if r.text.is_empty() {
-                        r.text = message.clone().unwrap_or_else(|| "已取消".into());
-                    }
-                }
-            }
-            self.emit_rows();
-            return;
-        }
         // 超时打断时，非流式还没写进输入框的中间结果补上；用户主动取消不补写
         if message.is_some() && !streamed && !partial.is_empty() {
-            if mode == Mode::Pick {
-                let text = partial.clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(80)).await;
-                    pf::paste(&text);
-                });
-            } else {
-                pf::paste(&partial);
-            }
+            pf::paste(&partial);
         }
         match message {
-            Some(m) if !partial.is_empty() => ui::hud_error(&self.app, &format!("{m}，已保留已识别的文字")),
-            Some(m) => ui::hud_error(&self.app, &m),
+            Some(m) => {
+                let text = if partial.is_empty() { m } else { format!("{m}，已保留已识别的文字") };
+                self.publish(serde_json::json!({ "type": "error", "stage": "session", "message": text }));
+                ui::hud_error(&self.app, &text);
+            }
             None => ui::hud_hide(&self.app, 0),
         }
     }
@@ -814,54 +533,29 @@ impl Ctl {
         for t in self.tasks.drain(..) {
             t.abort();
         }
-        self.stop_recording();
+        self.recording = false;
         if let Some(mut t) = self.typer.take() {
             t.finish();
-        }
-        if self.mode == Mode::Pick {
-            self.hk.picking.store(false, Ordering::Relaxed);
-            ui::pick_hide(&self.app);
         }
         self.mode = Mode::Idle;
     }
 
-    fn pick_key(&mut self, k: Special) {
-        let n = self.rows.len();
-        if n == 0 {
+    /// 手机点了某条候选
+    fn commit(&mut self, channel: &str) {
+        if self.mode != Mode::Pick {
             return;
         }
-        match k {
-            Special::Up | Special::Down => {
-                self.sel = if k == Special::Down { (self.sel + 1) % n } else { (self.sel + n - 1) % n };
-                self.user_picked = true;
-                self.emit_rows();
-            }
-            Special::Digit(d) => {
-                let i = d as usize - 1;
-                if i >= n {
-                    return;
-                }
-                if self.sel == i {
-                    self.choose(i);
-                } else {
-                    self.sel = i;
-                    self.user_picked = true;
-                    self.emit_rows();
-                }
-            }
-            Special::Enter => self.choose(self.sel),
-            Special::Escape => self.abort(None),
-        }
+        let Ok(ch) = serde_json::from_value::<Channel>(serde_json::json!(channel)) else { return };
+        let Some(i) = self.rows.iter().position(|r| r.channel == ch) else { return };
+        self.choose(i);
     }
 
-    /// 选中一行上屏；聆听/识别中的行先结束录音，定稿后自动上屏；失败的行抖动提示
+    /// 选中一行上屏；还在监听的行等它定稿再说，失败的行提示重选
     fn choose(&mut self, i: usize) {
         let Some(r) = self.rows.get(i) else { return };
         if matches!(r.state, RowState::Listen | RowState::Wait) {
             self.sel = i;
             self.user_picked = true;
-            self.choose_pending = true;
-            self.end();
             self.emit_rows();
             return;
         }
@@ -869,7 +563,7 @@ impl Ctl {
             self.sel = i;
             self.user_picked = true;
             self.emit_rows();
-            let _ = self.app.emit_to("pick", "pick-shake", i);
+            self.publish(serde_json::json!({ "type": "shake", "row": i }));
             return;
         }
         let text = r.text.clone();
@@ -878,15 +572,9 @@ impl Ctl {
             s.last_pick = Some(ch);
             *s.pick_counts.entry(ch).or_default() += 1;
         });
-        let front = self.front.take();
         self.cancel();
-        tauri::async_runtime::spawn(async move {
-            if let Some(f) = front {
-                f.activate();
-            }
-            tokio::time::sleep(Duration::from_millis(80)).await;
-            pf::paste(&text);
-        });
+        pf::paste(&text);
+        self.publish(serde_json::json!({ "type": "final", "text": text }));
     }
 
     /// 最多每 33ms 推送一次，避免文字跳动
@@ -904,16 +592,22 @@ impl Ctl {
             return;
         }
         self.last_emit = Instant::now();
-        let model = Model { recording: self.recording, rows: &self.rows, sel: self.sel };
-        match self.mode {
-            Mode::Pick => {
-                let _ = self.app.emit_to("pick", "pick", model);
-            }
-            _ => {
-                let _ = self.app.emit_to("main", "compare", model);
-            }
+        let text = match self.mode {
+            Mode::Single(_) => self.segs.text(),
+            _ => String::new(),
+        };
+        let model = Model { recording: self.recording, rows: &self.rows, sel: self.sel, text };
+        if let Ok(v) = serde_json::to_value(&model) {
+            self.publish(serde_json::json!({ "type": "rows", "model": v }));
         }
+        // 桌面浮层仍然显示，用户看手机也能瞥一眼屏幕
+        let _ = self.app.emit("rows", v_clone(&model));
     }
+}
+
+/// emit 需要拥有所有权，这里重新序列化一份，避免为了它改变 Model 的借用形态
+fn v_clone(model: &Model<'_>) -> serde_json::Value {
+    serde_json::to_value(model).unwrap_or(serde_json::Value::Null)
 }
 
 #[cfg(test)]

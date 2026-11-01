@@ -1,9 +1,0 @@
-.gradle/
-build/
-local.properties
-rust/target/
-app/src/main/jniLibs/
-*.apk
-*.keystore
-*.jks
-keystore.properties

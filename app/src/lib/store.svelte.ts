@@ -1,15 +1,13 @@
-import { call, on, applyLook, type AppInfo, type Settings, type Perms, type Model, type Shortcut, type OfflineStatus, type Channel, type UpdateStatus } from "./api";
+import { call, on, applyLook, type AppInfo, type Settings, type Model, type OfflineStatus, type Channel, type UpdateStatus, type Remote } from "./api";
 
 export const app = $state({
   info: null as AppInfo | null,
   s: null as Settings | null,
-  perms: { accessibility: true, mic: "granted" } as Perms,
-  level: 0,
-  compare: null as Model | null,
-  recording: false,
-  mics: [] as string[],
+  rows: null as Model | null,
   models: {} as Partial<Record<Channel, OfflineStatus>>,
   update: { state: "idle" } as UpdateStatus,
+  remote: { url: null, qr: null } as Remote,
+  paused: false,
 });
 
 export function save(patch: Partial<Settings>) {
@@ -18,25 +16,25 @@ export function save(patch: Partial<Settings>) {
   call("set_settings", { settings: app.s });
 }
 
-export async function refreshPerms() {
-  app.perms = await call<Perms>("perm_status");
+export function setPaused(on: boolean) {
+  app.paused = on;
+  call("set_paused", { on });
 }
 
-let micRevision = 0;
-
-export async function refreshMics() {
-  const revision = ++micRevision;
-  const mics = await call<string[]>("microphones");
-  if (revision === micRevision) app.mics = mics;
+/** 隧道地址是异步就绪的，收到 remote 事件后再取一次 */
+export async function refreshRemote() {
+  const info = await call<AppInfo>("get_state");
+  app.remote = info.remote;
 }
 
 export async function init() {
   const info = await call<AppInfo>("get_state");
   app.info = info;
   app.s = info.settings;
-  app.perms = info.perms;
   app.models = info.models;
   app.update = info.update;
+  app.remote = info.remote;
+  app.paused = info.paused;
   const look = () => app.s && applyLook(info.platform, app.s.theme);
   look();
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", look);
@@ -44,14 +42,10 @@ export async function init() {
     app.s = s;
     look();
   });
-  on<number>("level", (v) => (app.level = v));
   on<{ ch: Channel; status: OfflineStatus }>("model", (v) => (app.models[v.ch] = v.status));
   on<UpdateStatus>("update", (v) => (app.update = v));
-  on<Model>("compare", (m) => (app.compare = m));
-  on<Shortcut | null>("recorded", () => (app.recording = false));
-  await on<string[]>("microphones", (mics) => {
-    ++micRevision;
-    app.mics = mics;
+  on<Model>("rows", (m) => (app.rows = m));
+  on<{ state: string; error?: string }>("remote", (v) => {
+    if (v.state === "ready" || v.state === "failed") refreshRemote();
   });
-  await refreshMics();
 }

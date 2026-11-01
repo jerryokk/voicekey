@@ -2,7 +2,6 @@
   import { app, save } from "../lib/store.svelte";
   import { call, CH, LOCAL, type Channel } from "../lib/api";
   import ChIcon from "../lib/ChIcon.svelte";
-  import Compare from "./Compare.svelte";
 
   const s = $derived(app.s!);
   const engines = $derived(app.info!.channels.filter((c) => c !== "all"));
@@ -57,12 +56,6 @@
     </div>
   </button>
 </div>
-{#if !app.info!.offline.supported}
-  <div class="note">ⓘ 豆包离线仅支持 Apple 芯片的 Mac，其他设备可使用微信离线。</div>
-{/if}
-<h3>渠道对比</h3>
-<Compare />
-
 <style>
   .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .ch { position: relative; display: flex; flex-direction: column; justify-content: flex-start; background: var(--card); border: 1.5px solid var(--line); border-radius: var(--r); padding: 14px; cursor: pointer; transition: 0.15s; text-align: left; }

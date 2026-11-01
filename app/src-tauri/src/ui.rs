@@ -1,9 +1,10 @@
-//! 窗口与托盘：设置窗口、胶囊浮层（hud）、候选面板（pick）
+//! 窗口与托盘：设置窗口、胶囊浮层。
+//!
+//! 候选面板没有了——挑哪一条在手机上做，所以这里不再需要光标定位，也不会再抢焦点。
 use crate::settings::{Channel, Settings};
 use crate::AppState;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::time::Duration;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -14,11 +15,8 @@ const TRAY: &[u8] = include_bytes!("../icons/tray.png");
 const TRAY_ACTIVE: &[u8] = include_bytes!("../icons/tray-active.png");
 const HUD_W: f64 = 680.0;
 const HUD_H: f64 = 120.0;
-const PICK_W: f64 = 520.0;
 
 static HUD_TOKEN: AtomicU64 = AtomicU64::new(0);
-/// 候选面板锚点（统一坐标空间：macOS 逻辑点 / Windows 物理像素）
-static PICK_ANCHOR: Mutex<Option<Anchor>> = Mutex::new(None);
 
 #[derive(Clone, Copy)]
 struct Area {
@@ -27,13 +25,6 @@ struct Area {
     w: f64,
     h: f64,
     scale: f64,
-}
-
-#[derive(Clone, Copy)]
-struct Anchor {
-    caret: Option<(f64, f64, f64, f64)>,
-    area: Area,
-    height: f64,
 }
 
 fn work_area(m: &Monitor) -> Area {
@@ -51,7 +42,11 @@ fn work_area(m: &Monitor) -> Area {
 
 /// 统一坐标空间下的尺寸换算：macOS 用逻辑点，Windows 用物理像素
 fn units(a: &Area, logical: f64) -> f64 {
-    if cfg!(target_os = "macos") { logical } else { logical * a.scale }
+    if cfg!(target_os = "macos") {
+        logical
+    } else {
+        logical * a.scale
+    }
 }
 
 fn set_pos<R: Runtime>(w: &WebviewWindow<R>, x: f64, y: f64) {
@@ -62,7 +57,6 @@ fn set_pos<R: Runtime>(w: &WebviewWindow<R>, x: f64, y: f64) {
     };
 }
 
-/// macOS 逻辑点；Windows 用物理像素向上取整。否则 120% 缩放下 WebView 客户区比内容小一截
 fn set_client<R: Runtime>(w: &WebviewWindow<R>, a: &Area, logical_w: f64, logical_h: f64) {
     let _ = if cfg!(target_os = "macos") {
         w.set_size(LogicalSize::new(logical_w, logical_h))
@@ -102,11 +96,6 @@ fn overlay<R: Runtime>(app: &AppHandle<R>, label: &str, w: f64, h: f64) -> tauri
 
 pub fn create_overlays<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     overlay(app, "hud", HUD_W, HUD_H)?.set_ignore_cursor_events(true)?;
-    let pick = overlay(app, "pick", PICK_W, 300.0)?;
-    #[cfg(target_os = "macos")]
-    panel::convert(&pick);
-    #[cfg(not(target_os = "macos"))]
-    let _ = pick;
     Ok(())
 }
 
@@ -126,8 +115,7 @@ pub fn show_settings<R: Runtime>(app: &AppHandle<R>) {
         .center();
     #[cfg(target_os = "macos")]
     let b = b.title_bar_style(tauri::TitleBarStyle::Overlay).hidden_title(true);
-    let built = b.build();
-    if let Ok(w) = built {
+    if let Ok(w) = b.build() {
         let _ = w.set_focus();
     }
 }
@@ -174,95 +162,8 @@ pub fn hud_hide<R: Runtime>(app: &AppHandle<R>, delay_ms: u64) {
     });
 }
 
-fn caret_in_space<R: Runtime>(app: &AppHandle<R>, r: voicekey_platform::Rect) -> Option<((f64, f64, f64, f64), Area)> {
-    let mons = app.available_monitors().ok()?;
-    mons.iter().find_map(|m| {
-        let s = m.scale_factor();
-        let (px, py) = (m.position().x as f64, m.position().y as f64);
-        let (pw, ph) = (m.size().width as f64, m.size().height as f64);
-        let (bx, by, bw, bh) = if r.physical { (px, py, pw, ph) } else { (px / s, py / s, pw / s, ph / s) };
-        let inside = r.x >= bx && r.x < bx + bw && r.y >= by && r.y < by + bh;
-        inside.then(|| ((r.x, r.y, r.w, r.h), work_area(m)))
-    })
-}
-
-fn place_pick<R: Runtime>(w: &WebviewWindow<R>, a: &Anchor) {
-    let ar = &a.area;
-    let gap = units(ar, 6.0);
-    let pw = units(ar, PICK_W);
-    // 高度先限制在工作区内。否则 ph 过大时 clamp 上界小于下界，Rust 直接 panic 闪退。
-    let requested = if a.height.is_finite() { units(ar, a.height) } else { units(ar, 160.0) };
-    let ph = cap_len(requested, ar.h, gap);
-    let logical_h = if cfg!(target_os = "macos") { ph } else { ph / ar.scale };
-    let (x, y) = match a.caret {
-        Some((cx, cy, _, chh)) => {
-            let above = cy - ph - gap;
-            (cx - units(ar, 40.0), if above >= ar.y { above } else { cy + chh + gap })
-        }
-        None => (ar.x + (ar.w - pw) / 2.0, ar.y + ar.h - ph - units(ar, 120.0)),
-    };
-    let x = clamp_axis(x, ar.x + gap, ar.x + ar.w - pw - gap);
-    let y = clamp_axis(y, ar.y + gap, ar.y + ar.h - ph - gap);
-    set_client(w, ar, PICK_W, logical_h);
-    set_pos(w, x, y);
-}
-
-/// `f64::clamp` 在 min > max 时 panic。面板比屏幕还宽/高时上界可能小于下界。
-fn clamp_axis(v: f64, min: f64, max: f64) -> f64 {
-    v.clamp(min, max.max(min))
-}
-
-fn cap_len(requested: f64, area: f64, gap: f64) -> f64 {
-    requested.min((area - gap * 2.0).max(1.0)).max(1.0)
-}
-
-pub fn pick_show<R: Runtime>(app: &AppHandle<R>, caret: Option<voicekey_platform::Rect>, rows: usize, focus: bool) {
-    let Some(w) = app.get_webview_window("pick") else { return };
-    let (caret, area) = match caret.and_then(|r| caret_in_space(app, r)) {
-        Some((c, a)) => (Some(c), a),
-        None => match cursor_area(app) {
-            Some(a) => (None, a),
-            None => return,
-        },
-    };
-    let a = Anchor { caret, area, height: 92.0 + rows as f64 * 48.0 };
-    *PICK_ANCHOR.lock().unwrap() = Some(a);
-    place_pick(&w, &a);
-    #[cfg(target_os = "macos")]
-    panel::KEYABLE.store(focus, std::sync::atomic::Ordering::Relaxed);
-    let _ = w.show();
-    #[cfg(not(target_os = "macos"))]
-    if focus {
-        let _ = w.set_focus();
-    }
-}
-
-/// 前端按内容高度回报，保持底边贴着光标
-pub fn pick_resize<R: Runtime>(app: &AppHandle<R>, height: f64) {
-    if !height.is_finite() || height < 1.0 {
-        return;
-    }
-    let Some(w) = app.get_webview_window("pick") else { return };
-    let mut g = PICK_ANCHOR.lock().unwrap();
-    if let Some(a) = g.as_mut() {
-        a.height = height;
-        place_pick(&w, a);
-    }
-}
-
-pub fn pick_hide<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(w) = app.get_webview_window("pick") {
-        let _ = w.hide();
-    }
-}
-
 fn tray_menu<R: Runtime>(app: &AppHandle<R>, s: &Settings, paused: bool) -> tauri::Result<Menu<R>> {
-    let head = if paused {
-        "已暂停监听".to_string()
-    } else {
-        let tap = s.tap_shortcut.as_ref().map(|t| format!(" 或点按 {}", t.title())).unwrap_or_default();
-        format!("长按 {}{} 说话", s.hold_name(), tap)
-    };
+    let head = if paused { "已暂停监听".to_string() } else { "在手机上按住说话".to_string() };
     let mut items: Vec<Box<dyn IsMenuItem<R>>> = vec![
         Box::new(MenuItem::with_id(app, "head", head, false, None::<&str>)?),
         Box::new(PredefinedMenuItem::separator(app)?),
@@ -310,92 +211,5 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>, s: &Settings) -> tauri::Result
 pub fn refresh_tray<R: Runtime>(app: &AppHandle<R>, s: &Settings, paused: bool) {
     if let (Some(t), Ok(m)) = (app.tray_by_id("main"), tray_menu(app, s, paused)) {
         let _ = t.set_menu(Some(m));
-    }
-}
-
-pub fn set_tray_active<R: Runtime>(app: &AppHandle<R>, active: bool) {
-    if !cfg!(target_os = "macos") {
-        return;
-    }
-    if let Some(t) = app.tray_by_id("main") {
-        let _ = t.set_icon(tray_icon(app, active));
-        let _ = t.set_icon_as_template(true);
-    }
-}
-
-/// macOS：候选面板换成不激活应用的 NSPanel。需要接收按键时（安全输入）成为 key window，
-/// 键盘事件直达面板而前台应用保持激活；其余时候不抢键盘。
-#[cfg(target_os = "macos")]
-mod panel {
-    use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
-    use objc2::{msg_send, sel};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use tauri::{Runtime, WebviewWindow};
-
-    pub static KEYABLE: AtomicBool = AtomicBool::new(false);
-    const NONACTIVATING: usize = 1 << 7;
-
-    extern "C" {
-        fn object_setClass(obj: *mut AnyObject, cls: *const AnyClass) -> *const AnyClass;
-    }
-
-    extern "C-unwind" fn can_key(_: &AnyObject, _: Sel) -> Bool {
-        Bool::new(KEYABLE.load(Ordering::Relaxed))
-    }
-
-    extern "C-unwind" fn no(_: &AnyObject, _: Sel) -> Bool {
-        Bool::NO
-    }
-
-    fn class() -> &'static AnyClass {
-        if let Some(c) = AnyClass::get(c"VKPanel") {
-            return c;
-        }
-        let mut b = ClassBuilder::new(c"VKPanel", AnyClass::get(c"NSPanel").unwrap()).unwrap();
-        unsafe {
-            b.add_method(sel!(canBecomeKeyWindow), can_key as extern "C-unwind" fn(_, _) -> _);
-            b.add_method(sel!(canBecomeMainWindow), no as extern "C-unwind" fn(_, _) -> _);
-        }
-        b.register()
-    }
-
-    pub fn convert<R: Runtime>(w: &WebviewWindow<R>) {
-        let Ok(ptr) = w.ns_window() else { return };
-        let ptr = ptr as usize;
-        let _ = w.run_on_main_thread(move || unsafe {
-            let obj = ptr as *mut AnyObject;
-            object_setClass(obj, class());
-            let o = &*obj;
-            let mask: usize = msg_send![o, styleMask];
-            let _: () = msg_send![o, setStyleMask: mask | NONACTIVATING];
-            let _: () = msg_send![o, setHidesOnDeactivate: Bool::NO];
-            let _: () = msg_send![o, setHasShadow: Bool::NO];
-        });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{cap_len, clamp_axis};
-
-    #[test]
-    fn clamp_axis_when_panel_exceeds_work_area() {
-        // 旧代码上界只 max(ar.y)，下界是 ar.y + gap，面板超高时 min > max。
-        let ar_y = 25.0;
-        let gap = 6.0;
-        let min_y = ar_y + gap;
-        let max_y = ar_y;
-        assert!(min_y > max_y);
-        assert_eq!(clamp_axis(10.0, min_y, max_y), min_y);
-    }
-
-    #[test]
-    fn cap_len_keeps_panel_inside_work_area() {
-        let ar_y = 25.0;
-        let area = 800.0;
-        let gap = 6.0;
-        let ph = cap_len(1400.0, area, gap);
-        assert!(ar_y + area - ph - gap >= ar_y + gap);
-        assert!(ph + gap * 2.0 <= area + f64::EPSILON);
     }
 }

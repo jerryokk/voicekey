@@ -4,3 +4,6 @@ build/
 /target/
 /dist/
 .DS_Store
+qr.svg
+node_modules/
+dist/

@@ -1,19 +1,12 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import { app, save, refreshPerms } from "../lib/store.svelte";
+  import { app, save } from "../lib/store.svelte";
   import { call } from "../lib/api";
-  import Perms from "./Perms.svelte";
 
-  let { rerun }: { rerun: () => void } = $props();
   const s = $derived(app.s!);
   const info = $derived(app.info!);
   const u = $derived(app.update);
   const THEMES: [string, string][] = [["system", "跟随系统"], ["light", "浅色"], ["dark", "深色"]];
 
-  onMount(() => {
-    const iv = setInterval(refreshPerms, 1000);
-    return () => clearInterval(iv);
-  });
 </script>
 
 <h2>通用</h2>
@@ -30,10 +23,6 @@
     </div>
   </div>
 </div>
-{#if info.platform === "mac"}
-  <h3>权限</h3>
-  <div class="group"><Perms /></div>
-{/if}
 <h3>关于</h3>
 <div class="group">
   <div class="row">
@@ -46,9 +35,5 @@
     {:else}
       <button class="btn" disabled={u.state === "checking"} onclick={() => call("update_check")}>{u.state === "checking" ? "检查中…" : "检查更新"}</button>
     {/if}
-  </div>
-  <div class="row">
-    <div class="lbl">重新运行首次引导</div>
-    <button class="btn" onclick={rerun}>打开</button>
   </div>
 </div>

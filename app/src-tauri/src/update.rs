@@ -31,7 +31,7 @@ fn set<R: Runtime>(app: &AppHandle<R>, v: Value) {
     if changed {
         let st = app.state::<crate::AppState>();
         let s = st.settings.read().unwrap().clone();
-        crate::ui::refresh_tray(app, &s, st.hk.paused.load(Ordering::Relaxed));
+        crate::ui::refresh_tray(app, &s, st.paused.load(Ordering::Relaxed));
     }
 }
 

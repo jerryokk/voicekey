@@ -10,17 +10,7 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15
-            target: universal-apple-darwin
-            rust: aarch64-apple-darwin,x86_64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            rust: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     defaults:
       run:
         shell: bash
@@ -35,11 +25,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.rust }}
+          targets: x86_64-pc-windows-msvc
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: x86_64-pc-windows-msvc
+
+      # voicekey-core 依赖 audiopus_sys，它要用 cmake 从源码编 libopus
+      - name: cmake
+        run: choco install cmake --install-arguments="ADD_CMAKE_TO_PATH=System" --no-progress -y
 
       - name: Version
         run: |
@@ -47,23 +41,12 @@ jobs:
           [[ "$GITHUB_REF_TYPE" == tag ]] || VER="0.0.0"
           echo "VER=$VER" >> "$GITHUB_ENV"
 
-      # 固定的自签名证书：签名标识不随版本变化，更新后辅助功能等授权不丢失
-      - name: Signing certificate (macOS)
-        if: runner.os == 'macOS'
-        env:
-          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      - name: cloudflared
         run: |
-          KC="$RUNNER_TEMP/sign.keychain-db"
-          KP=$(openssl rand -hex 16)
-          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security create-keychain -p "$KP" "$KC"
-          security set-keychain-settings -lut 21600 "$KC"
-          security unlock-keychain -p "$KP" "$KC"
-          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" "$KC" >/dev/null
-          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
-          rm "$RUNNER_TEMP/cert.p12"
+          mkdir -p app/src-tauri/binaries
+          curl -fsSL -o app/src-tauri/binaries/cloudflared.exe \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
+          ls -la app/src-tauri/binaries
 
       - name: Build
         working-directory: app
@@ -72,19 +55,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           npm ci
-          npx tauri build --target ${{ matrix.target }} --config "{\"version\":\"$VER\",\"bundle\":{\"createUpdaterArtifacts\":true,\"macOS\":{\"signingIdentity\":\"VoiceKey Self-Signed\"}}}"
+          npx tauri build --target x86_64-pc-windows-msvc --config "{\"version\":\"$VER\",\"bundle\":{\"createUpdaterArtifacts\":true}}"
 
-      - name: Package (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          mkdir -p dist
-          B=target/universal-apple-darwin/release/bundle/macos
-          Scripts/dmg.sh "dist/VoiceKey-$VER.dmg" $B/VoiceKey.app app/src-tauri/icons/icon.icns
-          cp $B/VoiceKey.app.tar.gz "dist/VoiceKey-$VER-mac.app.tar.gz"
-          cp $B/VoiceKey.app.tar.gz.sig "dist/VoiceKey-$VER-mac.app.tar.gz.sig"
-
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
+      - name: Package
         run: |
           mkdir -p dist
           B=target/x86_64-pc-windows-msvc/release/bundle
@@ -94,7 +67,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: VoiceKey-${{ runner.os }}
+          name: VoiceKey-Windows
           path: dist/*
 
   release:
@@ -102,6 +75,8 @@ jobs:
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -111,14 +86,10 @@ jobs:
         run: |
           VER="${GITHUB_REF_NAME#v}"
           URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
-          MAC="VoiceKey-$VER-mac.app.tar.gz"
           WIN="VoiceKey-$VER-x64-setup.exe"
           jq -n --arg v "$VER" --arg d "$(date -u +%FT%TZ)" \
-            --arg ms "$(cat dist/$MAC.sig)" --arg mu "$URL/$MAC" --arg ws "$(cat dist/$WIN.sig)" --arg wu "$URL/$WIN" \
-            '{version: $v, pub_date: $d, platforms: {
-              "darwin-aarch64": {signature: $ms, url: $mu},
-              "darwin-x86_64": {signature: $ms, url: $mu},
-              "windows-x86_64": {signature: $ws, url: $wu}}}' > dist/latest.json
+            --arg ws "$(cat dist/$WIN.sig)" --arg wu "$URL/$WIN" \
+            '{version: $v, pub_date: $d, platforms: {"windows-x86_64": {signature: $ws, url: $wu}}}' > dist/latest.json
           rm dist/*.sig
 
       - name: Publish release
@@ -126,4 +97,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "VoiceKey $GITHUB_REF_NAME" --generate-notes \
-            --notes "macOS 包未经 Apple 公证（自签名）：首次安装时打开 DMG 将 VoiceKey 拖到「应用程序」，运行前在终端执行 \`xattr -dr com.apple.quarantine /Applications/VoiceKey.app\`；之后可在应用内（设置 → 通用，或菜单栏）直接更新。Windows 提供安装程序（setup.exe）与 MSI 两种格式。"
+            --notes "Windows 安装包。手机与电脑需要在同一台机器上配合：装好后打开设置，用手机扫「手机接入」里的二维码，按住说话即可。公网地址每次启动都会变，谁拿到它谁就能往这台电脑输入文字，不要外传。"
