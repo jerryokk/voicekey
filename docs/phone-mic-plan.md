@@ -180,7 +180,7 @@ P0–P4 全部在 `tools/probe/` 里做，不碰主仓库；P5 才开始动正�
 | P4 回落 | 服务端完成 | `pcm-test.mjs` 走 WS 二进制，230 帧 / 144 kB / 4.6 秒，定稿正确；丢包 >5% 时服务端下发 `prefer` 让页面改走回落 |
 | P5 并入 | 完成 | `crates/remote` 接入 `app/src-tauri`；`controller` 改为 Press/Release 驱动；删 `hotkey.rs`、`offline.rs`、pick 面板与光标定位；设置页换成「手机接入/识别/输出/通用」 |
 | P6 删分支 | 完成 | 删 `ios/`、`android/`、`Sources/`、`Package.swift`、`build.sh`、`Scripts/`、`crates/hanbao`、`mac.rs`、`cpal` 采集；CI 只剩 Windows；`cargo test --workspace` 10 项通过 |
-| P7 打磨 | 部分 | 已做：二维码、断开提示、丢包切换、`busy` 互斥、托盘暂停。未做：长时间空闲关隧道、PWA 图标、诊断页 |
+| P7 打磨 | 大部分 | 已做：二维码、断开提示、丢包切换、`busy` 互斥、托盘暂停、退格键、隧道四态可见（starting/ready/failed/仅限局域网）。未做：named tunnel（稳定域名）、PWA 图标、诊断页 |
 
 `crates/remote` 里目前已有：axum 服务、cloudflared 拉起与地址解析、WS 信令、WebRTC 收流、Opus 解到 16k、`Inbox` 合流、泵任务、`busy` 互斥、丢包驱动的通道切换。`tools/probe/` 只剩「接线 + 上屏 + 二维码」三件事，以及 `pcm-test.mjs` 这个不要手机的验证入口。
 
