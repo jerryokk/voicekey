@@ -25,7 +25,7 @@ crates/
   wtlocal/           微信离线推理
 tools/
   probe/             不用手机就能验证协议层的小工具，workspace 成员
-docs/                设计文档与截图
+docs/phone-mic-plan.md  手机接入方案的设计与验收记录
 run.cmd              开发运行入口（补 cmake 路径、检查依赖）
 ```
 
