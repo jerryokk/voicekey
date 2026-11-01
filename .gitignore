@@ -1,9 +1,7 @@
 .build/
-build/
 *.app
-/target/
-/dist/
 .DS_Store
-qr.svg
+target/
 node_modules/
 dist/
+qr.svg
