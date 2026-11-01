@@ -25,6 +25,21 @@
           border: 1px solid #e6e6e1; overflow-y: auto; line-height: 1.7; white-space: pre-wrap;
           -webkit-user-select: text; user-select: text; touch-action: pan-y; }
   #text .ph { color: #b6b6b0; }
+  #rows { display: flex; flex-direction: column; gap: 8px; max-height: 30vh; overflow-y: auto;
+          margin-bottom: 12px; touch-action: pan-y; }
+  #rows.hide { display: none; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 11px 13px; background: #fff;
+         border: 1px solid #e6e6e1; border-radius: 12px; transition: border-color .12s ease, background .12s ease; }
+  .row .name { font-size: 13px; font-weight: 600; color: #222; flex: none; }
+  .row .txt { flex: 1; font-size: 13px; color: #6b6b66; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .st { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #c9c9c4; }
+  .row.listen .st { background: #d85a30; animation: pulse 1s ease-in-out infinite; }
+  .row.final .st { background: #1d9e75; }
+  .row.error .st { background: #b34040; }
+  .row.sel { border-color: #222; background: #fafaf8; }
+  .row.shake { animation: shake .4s ease; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  @keyframes shake { 20%, 60% { transform: translateX(-5px); } 40%, 80% { transform: translateX(5px); } }
   #talk { height: 22vh; min-height: 132px; border: none; border-radius: 20px; background: #222; color: #fff;
           font-size: 19px; letter-spacing: 1px; display: flex; align-items: center; justify-content: center;
           flex-direction: column; gap: 6px; touch-action: none; }
@@ -48,6 +63,7 @@
 <div id="app">
   <div id="bar"><span id="dot"></span><span id="state">未连接</span><span id="hint"></span></div>
   <div id="text"><span class="ph">按住下方按钮说话，电脑端会收到音频。</span></div>
+  <div id="rows" class="hide"></div>
   <div id="ctl">
     <button id="del" aria-label="退格">
       <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.7"
@@ -69,7 +85,7 @@
 const token = new URLSearchParams(location.search).get('t') || '';
 const RATE = 16000, FRAME = 320;
 const $ = (id) => document.getElementById(id);
-const textEl = $('text'), talkEl = $('talk'), stateEl = $('state'), dotEl = $('dot'), hintEl = $('hint');
+const textEl = $('text'), talkEl = $('talk'), stateEl = $('state'), dotEl = $('dot'), hintEl = $('hint'), rowsEl = $('rows');
 
 let ws = null, ctx = null, node = null, stream = null, track = null;
 let pc = null, rtcReady = false, iceServers = [], preferPcm = false;
@@ -77,6 +93,27 @@ let active = false, sent = 0, t0 = 0, timer = 0;
 let resPos = 0, inRate = RATE, pcm = [];
 
 function setState(text, ok) { stateEl.textContent = text; dotEl.className = ok ? 'on' : ''; }
+
+// ---- 多渠道候选：服务端发 rows，点一条发 commit，选中的字由电脑上屏 ----
+const CH_NAME = { doubao: '豆包', wetype: '微信', qwen: '千问', baidu: '百度', sogou: '搜狗',
+                  iflytek: '讯飞', chatterfly: 'Chatterfly', wetypeoffline: '微信离线', all: '多渠道' };
+function esc(s) { return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+
+function renderRows(m) {
+  if (!m || !m.rows || !m.rows.length) { rowsEl.classList.add('hide'); rowsEl.innerHTML = ''; return; }
+  rowsEl.classList.remove('hide');
+  rowsEl.innerHTML = m.rows.map((r, i) =>
+    `<div class="row ${r.state}${i === m.sel ? ' sel' : ''}" data-ch="${r.channel}">` +
+      `<span class="name">${esc(CH_NAME[r.channel] || r.channel)}</span>` +
+      `<span class="txt">${esc(r.text) || '&nbsp;'}</span><span class="st"></span>` +
+    `</div>`
+  ).join('');
+}
+
+rowsEl.addEventListener('pointerup', (e) => {
+  const el = e.target.closest('.row');
+  if (el && ws && ws.readyState === 1) ws.send(JSON.stringify({ op: 'commit', channel: el.dataset.ch }));
+});
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -106,8 +143,16 @@ function connect() {
       setState('已切到回落通道（' + (msg.reason || '') + '）', false);
     } else if (msg.type === 'final') {
       textEl.textContent = msg.text || '（没有识别到内容）';
+      // 提交了某条候选或单渠道定稿：候选列表的使命结束
+      rowsEl.classList.add('hide');
+    } else if (msg.type === 'rows') {
+      renderRows(msg.model);
+    } else if (msg.type === 'shake') {
+      const el = rowsEl.children[msg.row];
+      if (el) { el.classList.remove('shake'); void el.offsetWidth; el.classList.add('shake'); }
     } else if (msg.type === 'error') {
       textEl.textContent = '出错（' + msg.stage + '）：' + msg.message;
+      rowsEl.classList.add('hide');
     }
   };
 }

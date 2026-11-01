@@ -146,11 +146,6 @@ fn set_paused(app: AppHandle, on: bool) {
 }
 
 #[tauri::command]
-fn open_url(url: String) {
-    let _ = std::process::Command::new("explorer").arg(url).spawn();
-}
-
-#[tauri::command]
 fn update_check(app: AppHandle) {
     update::check(&app, true);
 }
@@ -162,13 +157,12 @@ fn update_install(app: AppHandle) {
 
 fn main() {
     let settings = Settings::load();
-    let first_run = !settings.onboarded;
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| ui::show_settings(app)))
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
-            get_state, set_settings, model_download, set_paused, open_url, update_check, update_install
+            get_state, set_settings, model_download, set_paused, update_check, update_install
         ])
         .setup(move |app| {
             let (tx, rx) = mpsc::unbounded_channel();
@@ -194,9 +188,7 @@ fn main() {
             ui::create_overlays(&handle)?;
             ui::build_tray(&handle, &settings)?;
             apply(&handle, &settings);
-            if first_run {
-                ui::show_settings(&handle);
-            }
+            // 托盘应用，安静启动；入口在托盘图标（设置 / 暂停 / 退出）
             update::schedule(&handle);
             Ok(())
         })

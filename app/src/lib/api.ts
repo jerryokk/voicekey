@@ -20,7 +20,6 @@ export interface Settings {
   pickCounts: Partial<Record<Channel, number>>;
   autostart: boolean;
   theme: string;
-  onboarded: boolean;
 }
 
 export interface OfflineStatus { state: "missing" | "downloading" | "ready" | "failed"; progress?: number; error?: string }
@@ -30,14 +29,10 @@ export interface UpdateStatus { state: "idle" | "checking" | "latest" | "availab
 export interface Remote { url: string | null; qr: string | null; state?: "starting" | "ready" | "failed"; error?: string | null; lanOnly?: boolean }
 
 export interface AppInfo {
-  settings: Settings; platform: "mac" | "win"; version: string; channels: Channel[];
+  settings: Settings; platform: "win"; version: string; channels: Channel[];
   models: Partial<Record<Channel, OfflineStatus>>;
   paused: boolean; remote: Remote; update: UpdateStatus;
 }
-
-export type RowState = "listen" | "wait" | "final" | "error" | "skip";
-export interface Row { channel: Channel; text: string; state: RowState; ms: number | null }
-export interface Model { recording: boolean; rows: Row[]; sel: number; text: string }
 
 export const call = invoke;
 export const on = <T>(name: string, f: (p: T) => void): Promise<UnlistenFn> => listen<T>(name, (e) => f(e.payload));
@@ -60,12 +55,7 @@ export const LOCAL: Partial<Record<Channel, string>> = { wetypeoffline: "约 100
 /** 根据平台与主题设置 html class */
 export function applyLook(platform: string, theme: string) {
   const root = document.documentElement;
-  root.classList.toggle("mac", platform === "mac");
   root.classList.toggle("win", platform === "win");
   const dark = theme === "dark" || (theme === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
   root.classList.toggle("dark", dark);
-}
-
-export function esc(s: string) {
-  return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!);
 }

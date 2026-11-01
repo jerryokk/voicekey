@@ -36,7 +36,6 @@ use tokio::sync::{broadcast, mpsc, Mutex as AsyncMutex};
 use voicekey_core::Audio;
 
 const PAGE: &str = include_str!("page.html");
-const RATE: usize = 16_000;
 
 /// 手机端事件。音频不在事件里，按 Press 之后用 `Service::take_audio` 取走本句的帧流。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,20 +141,6 @@ impl Service {
     pub fn handle(&self) -> Handle {
         Handle(self.hub.clone())
     }
-
-    /// 直接推音频帧：只有开发验证用，正常路径由 WebRTC 与回落通道写入
-    pub fn push_pcm(&self, samples: &[i16]) {
-        self.hub.inbox.push(samples);
-    }
-
-    pub fn inbox(&self) -> Arc<Inbox> {
-        self.hub.inbox.clone()
-    }
-
-    /// 当前是否有设备正在说话
-    pub async fn busy(&self) -> bool {
-        self.hub.hold.lock().await.is_some()
-    }
 }
 
 /// 跨任务可克隆的下行句柄
@@ -165,14 +150,6 @@ pub struct Handle(Arc<Hub>);
 impl Handle {
     pub fn publish(&self, value: Value) {
         let _ = self.0.out.send(value.to_string());
-    }
-
-    pub fn push_pcm(&self, samples: &[i16]) {
-        self.0.inbox.push(samples);
-    }
-
-    pub fn inbox(&self) -> Arc<Inbox> {
-        self.0.inbox.clone()
     }
 }
 
@@ -397,6 +374,3 @@ fn new_token() -> String {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
     format!("{:016x}", (nanos as u64) << 32 | std::process::id() as u64)
 }
-
-/// 采样率与帧长，供上层换算时长
-pub const SAMPLE_RATE: usize = RATE;

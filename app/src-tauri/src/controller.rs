@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use voicekey_core::{
     Audio, BaiduEngine, ChatterflyEngine, DoubaoEngine, Engine, IflyEngine, QwenEngine, SogouEngine, WeTypeEngine,
@@ -600,14 +600,7 @@ impl Ctl {
         if let Ok(v) = serde_json::to_value(&model) {
             self.publish(serde_json::json!({ "type": "rows", "model": v }));
         }
-        // 桌面浮层仍然显示，用户看手机也能瞥一眼屏幕
-        let _ = self.app.emit("rows", v_clone(&model));
     }
-}
-
-/// emit 需要拥有所有权，这里重新序列化一份，避免为了它改变 Model 的借用形态
-fn v_clone(model: &Model<'_>) -> serde_json::Value {
-    serde_json::to_value(model).unwrap_or(serde_json::Value::Null)
 }
 
 #[cfg(test)]

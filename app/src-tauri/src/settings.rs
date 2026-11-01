@@ -70,7 +70,6 @@ pub struct Settings {
     pub pick_counts: HashMap<Channel, u32>,
     pub autostart: bool,
     pub theme: String,
-    pub onboarded: bool,
 }
 
 impl Default for Settings {
@@ -84,7 +83,6 @@ impl Default for Settings {
             pick_counts: HashMap::new(),
             autostart: false,
             theme: "system".into(),
-            onboarded: false,
         }
     }
 }

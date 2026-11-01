@@ -1,9 +1,8 @@
-import { call, on, applyLook, type AppInfo, type Settings, type Model, type OfflineStatus, type Channel, type UpdateStatus, type Remote } from "./api";
+import { call, on, applyLook, type AppInfo, type Settings, type OfflineStatus, type Channel, type UpdateStatus, type Remote } from "./api";
 
 export const app = $state({
   info: null as AppInfo | null,
   s: null as Settings | null,
-  rows: null as Model | null,
   models: {} as Partial<Record<Channel, OfflineStatus>>,
   update: { state: "idle" } as UpdateStatus,
   remote: { url: null, qr: null } as Remote,
@@ -44,7 +43,6 @@ export async function init() {
   });
   on<{ ch: Channel; status: OfflineStatus }>("model", (v) => (app.models[v.ch] = v.status));
   on<UpdateStatus>("update", (v) => (app.update = v));
-  on<Model>("rows", (m) => (app.rows = m));
   on<{ state: string; error?: string }>("remote", (v) => {
     if (v.state === "ready" || v.state === "failed") refreshRemote();
   });

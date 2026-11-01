@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 音频流在松手时自然结束，引擎会自己定稿；这里不需要做事
             Event::Release => {}
             // 这个外壳只跑单渠道，不涉及候选挑选
-            Event::Commit(_) => {}
+            Event::Commit(ch) => println!("收到候选提交：{ch}（probe 单渠道，忽略）"),
             Event::Erase(n) => {
                 if paste {
                     let _ = tokio::task::spawn_blocking(move || voicekey_platform::backspace(n as usize)).await;
