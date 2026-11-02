@@ -113,7 +113,7 @@
   }
   .detail { margin: 6px 0 0; font-size: var(--fs-sub); color: var(--fg-2); line-height: 1.7; }
 
-  .qrWrap { display: flex; gap: 16px; padding: 10px 0 14px; align-items: flex-start; }
+  .qrWrap { display: flex; gap: 18px; padding: 10px 0 14px; align-items: center; }
   .qr { background: #fff; border: 1px solid var(--line); border-radius: var(--r-md); padding: 10px; flex: none; }
   .qr :global(svg) { width: 158px; height: 158px; display: block; }
   .side { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }

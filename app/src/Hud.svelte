@@ -17,7 +17,7 @@
 <div class="wrap">
   <div class="capsule" class:show={st.state !== "hidden"} class:error={st.state === "error"}>
     {#if st.state === "error"}
-      <span class="ic sm bad">!</span>
+      <span class="badge">!</span>
     {:else}
       <ChIcon ch={st.channel} size="sm" />
     {/if}
@@ -41,11 +41,20 @@
     opacity: 0; transform: translateY(8px) scale(0.98); transition: opacity 0.16s, transform 0.16s;
   }
   .capsule.show { opacity: 1; transform: none; }
+  /* 出错要和录音看得出区别：底色偏红，不再只是中间多了个感叹号 */
+  .capsule.error {
+    background: rgba(58, 20, 16, 0.9);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35), inset 0 0 0 1px rgba(255, 120, 90, 0.28);
+  }
   .rec { width: 9px; height: 9px; border-radius: 50%; background: #d9552b; flex: none; animation: pulse 1s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: 0.35; } }
   .live { min-width: 0; max-width: 460px; white-space: nowrap; overflow: hidden; direction: rtl; text-align: left; font-size: 14px; }
   .live span { direction: ltr; unicode-bidi: plaintext; }
   .hint { font-size: 13px; opacity: 0.7; }
-  .bad { background: var(--err); font-size: 13px; }
+  .badge {
+    width: 22px; height: 22px; flex: none; border-radius: 6px;
+    display: grid; place-items: center;
+    background: #c0392b; color: #fff; font-size: 13px; font-weight: 600; line-height: 1;
+  }
   .spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid rgba(255, 255, 255, 0.25); border-top-color: #fff; animation: spin 0.8s linear infinite; flex: none; }
 </style>

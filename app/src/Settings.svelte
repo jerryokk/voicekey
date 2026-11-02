@@ -96,6 +96,9 @@
     background: none; color: var(--fg-2); font-size: 13px; text-align: left; cursor: pointer;
   }
   nav button:hover { background: var(--card-2); color: var(--fg); }
+  /* 点完不留描边（桌面应用的惯例）；键盘 Tab 过来时靠底色提示位置 */
+  nav button:focus,
+  nav button:focus-visible { outline: none; background: var(--card-2); }
   nav button.on { background: var(--card); color: var(--fg); box-shadow: 0 1px 2px rgba(24, 22, 16, .06); position: relative; }
   nav button.on::before {
     content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px;
