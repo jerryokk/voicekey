@@ -198,6 +198,14 @@ fn main() {
             if w.label() == "main" && matches!(e, WindowEvent::Destroyed) {
                 let _ = w.state::<AppState>().tx.send(Msg::Flush);
             }
+            // 二维码小窗按原生托盘弹层的行为：点窗口外面（失焦）就收起
+            if w.label() == "qr" {
+                if let WindowEvent::Focused(false) = e {
+                    if ui::qr_armed() {
+                        let _ = w.hide();
+                    }
+                }
+            }
         })
         .build(tauri::generate_context!())
         .expect("failed to build app")

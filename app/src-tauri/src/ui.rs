@@ -4,7 +4,7 @@
 use crate::settings::{Channel, Settings};
 use crate::AppState;
 use serde_json::json;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -17,6 +17,14 @@ const HUD_W: f64 = 680.0;
 const HUD_H: f64 = 120.0;
 
 static HUD_TOKEN: AtomicU64 = AtomicU64::new(0);
+/// 二维码窗口刚 show 出来时会有一次瞬时失焦（焦点还没落定），
+/// 用这个标记把那次抖动挡掉，否则窗口会闪一下自己关掉
+static QR_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// 二维码窗口是否已经稳定显示（可以响应「点外面自动关」）
+pub fn qr_armed() -> bool {
+    QR_ARMED.load(Ordering::Relaxed)
+}
 
 #[derive(Clone, Copy)]
 struct Area {
@@ -128,6 +136,7 @@ pub fn show_qr<R: Runtime>(app: &AppHandle<R>) {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+        arm_qr();
         return;
     }
     let b = WebviewWindowBuilder::new(app, "qr", WebviewUrl::App("index.html".into()))
@@ -143,7 +152,17 @@ pub fn show_qr<R: Runtime>(app: &AppHandle<R>) {
         place_qr(&w);
         let _ = w.show();
         let _ = w.set_focus();
+        arm_qr();
     }
+}
+
+/// 显示后短暂屏蔽失焦事件，之后才允许「点外面自动关」
+fn arm_qr() {
+    QR_ARMED.store(false, Ordering::Relaxed);
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        QR_ARMED.store(true, Ordering::Relaxed);
+    });
 }
 
 /// 右下角定位：用外框尺寸算，留 12pt 边距，避免贴边（任务栏工作区已经扣掉了任务栏本身）
