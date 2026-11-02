@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { app, init, refreshRemote } from "./lib/store.svelte";
+
+  const win = getCurrentWindow();
 
   onMount(() => {
     init();
@@ -9,6 +12,13 @@
   const ready = $derived(Boolean(app.remote.qr));
   const failed = $derived(app.remote.state === "failed" || app.remote.lanOnly === true);
 </script>
+
+<div class="bar" data-tauri-drag-region>
+  <span>扫码连接手机</span>
+  <button class="x" onclick={() => win.close()} aria-label="关闭">
+    <svg viewBox="0 0 10 10"><path d="M2 2l6 6M8 2l-6 6" /></svg>
+  </button>
+</div>
 
 <div class="wrap">
   {#if ready}
@@ -27,7 +37,13 @@
 </div>
 
 <style>
-  .wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 16px 16px; height: 100vh; background: #f7f7f5; }
+  .bar { height: 34px; display: flex; align-items: center; justify-content: space-between; padding: 0 6px 0 14px;
+         font-size: 12.5px; color: var(--fg2); background: #f1f1ee; border-bottom: 1px solid var(--line); }
+  .bar .x { width: 30px; height: 24px; display: grid; place-items: center; border: 0; border-radius: 6px;
+            background: none; color: var(--fg2); cursor: default; }
+  .bar .x:hover { background: #e81123; color: #fff; }
+  .bar svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; }
+  .wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 16px 16px; height: calc(100vh - 34px); background: #f7f7f5; }
   .qr { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 12px; }
   .qr :global(svg) { width: 240px; height: 240px; display: block; }
   .hint { margin: 0; font-size: 12.5px; color: var(--fg2); text-align: center; line-height: 1.6; }

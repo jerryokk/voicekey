@@ -120,6 +120,9 @@ pub fn show_settings<R: Runtime>(app: &AppHandle<R>) {
         .inner_size(860.0, 600.0)
         .resizable(false)
         .maximizable(false)
+        // 自绘顶栏：去掉系统标题栏，靠 CSS 画一条和界面同色的条 + 最小化/关闭
+        .decorations(false)
+        .shadow(true)
         .center();
     #[cfg(target_os = "macos")]
     let b = b.title_bar_style(tauri::TitleBarStyle::Overlay).hidden_title(true);
@@ -142,11 +145,13 @@ pub fn show_qr<R: Runtime>(app: &AppHandle<R>) {
     let b = WebviewWindowBuilder::new(app, "qr", WebviewUrl::App("index.html".into()))
         .initialization_script("window.__VK_VIEW = \"qr\";")
         .title("扫码连接手机")
-        .inner_size(320.0, 344.0)
+        .inner_size(320.0, 378.0)
         .resizable(false)
         .maximizable(false)
         .always_on_top(true)
         .skip_taskbar(true)
+        .decorations(false)
+        .shadow(true)
         .visible(false);
     if let Ok(w) = b.build() {
         place_qr(&w);
@@ -171,7 +176,7 @@ fn place_qr<R: Runtime>(w: &WebviewWindow<R>) {
     let (mut ww, mut wh) = w
         .outer_size()
         .map(|s| (s.width as f64, s.height as f64))
-        .unwrap_or((units(&a, 320.0), units(&a, 344.0)));
+        .unwrap_or((units(&a, 320.0), units(&a, 378.0)));
     if cfg!(target_os = "macos") {
         ww /= a.scale;
         wh /= a.scale;
@@ -232,6 +237,15 @@ fn tray_menu<R: Runtime>(app: &AppHandle<R>, s: &Settings) -> tauri::Result<Menu
     let sub = Submenu::with_items(app, "渠道", true, &refs)?;
 
     let mut items: Vec<Box<dyn IsMenuItem<R>>> = vec![
+        // 版本行（灰色不可点）：单实例机制下旧进程会吞掉新启动，这行是判断依据
+        Box::new(MenuItem::with_id(
+            app,
+            "ver",
+            format!("VoiceKey {} · {}", env!("CARGO_PKG_VERSION"), env!("VK_BUILD")),
+            false,
+            None::<&str>,
+        )?),
+        Box::new(PredefinedMenuItem::separator(app)?),
         Box::new(MenuItem::with_id(app, "qr", "显示二维码", true, None::<&str>)?),
         Box::new(sub),
         Box::new(PredefinedMenuItem::separator(app)?),

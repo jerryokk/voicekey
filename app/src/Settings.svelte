@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { app, init } from "./lib/store.svelte";
   import Logo from "./lib/Logo.svelte";
   import Connect from "./pages/Connect.svelte";
@@ -14,6 +15,7 @@
     { id: "general", name: "通用", icon: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>' },
   ];
   let page = $state("connect");
+  const win = getCurrentWindow();
 
   onMount(() => {
     init();
@@ -44,6 +46,14 @@
         {/if}
       </div>
     </nav>
+    <div class="wctl">
+      <button onclick={() => win.minimize()} aria-label="最小化">
+        <svg viewBox="0 0 10 10"><path d="M2 5h6" /></svg>
+      </button>
+      <button class="x" onclick={() => win.close()} aria-label="关闭">
+        <svg viewBox="0 0 10 10"><path d="M2 2l6 6M8 2l-6 6" /></svg>
+      </button>
+    </div>
     <main>
       <div class="drag" data-tauri-drag-region></div>
       {#if page === "connect"}<Connect />
@@ -57,8 +67,13 @@
 <style>
   .shell { display: flex; height: 100vh; }
   .side { width: 196px; background: var(--side); padding: 0 10px 12px; display: flex; flex-direction: column; gap: 2px; border-right: 1px solid var(--line); }
-  .drag { height: 28px; flex: none; }
-  :global(.win) .drag { height: 8px; }
+  .drag { height: 34px; flex: none; }
+  .wctl { position: fixed; top: 0; right: 0; height: 34px; display: flex; align-items: center; padding-right: 6px; z-index: 20; }
+  .wctl button { width: 34px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 6px;
+                 background: none; color: var(--fg2); cursor: default; }
+  .wctl button:hover { background: var(--line); color: var(--fg); }
+  .wctl button.x:hover { background: #e81123; color: #fff; }
+  .wctl svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; }
   .brand { display: flex; align-items: center; gap: 10px; padding: 6px 8px 14px; }
   .brand .app { width: 34px; height: 34px; border-radius: 9px; background: #171a2e; display: grid; place-items: center; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2); }
   .brand .app :global(svg) { width: 26px; height: 26px; }
