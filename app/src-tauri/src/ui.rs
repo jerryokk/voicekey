@@ -120,9 +120,11 @@ pub fn show_settings<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-/// 扫码小窗：托盘「显示二维码」用。独立于设置窗口，置顶、尺寸固定，扫完直接关
+/// 二维码小窗贴着托盘那一角弹出（光标所在显示器的工作区右下角），
+/// 而不是屏幕正中——它是个从托盘飞出来的临时面板
 pub fn show_qr<R: Runtime>(app: &AppHandle<R>) {
     if let Some(w) = app.get_webview_window("qr") {
+        place_qr(&w);
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
@@ -135,10 +137,28 @@ pub fn show_qr<R: Runtime>(app: &AppHandle<R>) {
         .resizable(false)
         .maximizable(false)
         .always_on_top(true)
-        .center();
+        .skip_taskbar(true)
+        .visible(false);
     if let Ok(w) = b.build() {
+        place_qr(&w);
+        let _ = w.show();
         let _ = w.set_focus();
     }
+}
+
+/// 右下角定位：用外框尺寸算，留 12pt 边距，避免贴边（任务栏工作区已经扣掉了任务栏本身）
+fn place_qr<R: Runtime>(w: &WebviewWindow<R>) {
+    let Some(a) = cursor_area(w.app_handle()) else { return };
+    let (mut ww, mut wh) = w
+        .outer_size()
+        .map(|s| (s.width as f64, s.height as f64))
+        .unwrap_or((units(&a, 320.0), units(&a, 344.0)));
+    if cfg!(target_os = "macos") {
+        ww /= a.scale;
+        wh /= a.scale;
+    }
+    let margin = units(&a, 12.0);
+    set_pos(w, a.x + a.w - ww - margin, a.y + a.h - wh - margin);
 }
 
 fn current_channel<R: Runtime>(app: &AppHandle<R>) -> Channel {
