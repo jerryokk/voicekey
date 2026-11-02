@@ -137,6 +137,25 @@ pub fn level(frame: &[i16]) -> f32 {
 }
 
 /// 调试用：读 wav 文件，按实时节奏喂帧
+/// 从内存里的 wav 字节切帧（自检用，不走文件系统）
+pub fn frames_from_bytes(bytes: &[u8]) -> Result<Vec<Vec<i16>>> {
+    let mut r = hound::WavReader::new(std::io::Cursor::new(bytes))?;
+    let spec = r.spec();
+    let ch = spec.channels as usize;
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Int => {
+            let scale = (1i64 << (spec.bits_per_sample - 1)) as f32;
+            r.samples::<i32>().map(|s| s.map(|v| v as f32 / scale)).collect::<Result<_, _>>()?
+        }
+        hound::SampleFormat::Float => r.samples::<f32>().collect::<Result<_, _>>()?,
+    };
+    let mono: Vec<f32> = samples.chunks(ch).map(|c| c.iter().sum::<f32>() / ch as f32).collect();
+    let mut framer = Framer::new(spec.sample_rate)?;
+    let mut frames = framer.push(&mono);
+    frames.extend(framer.flush());
+    Ok(frames)
+}
+
 pub fn file_frames(path: &str, realtime: bool) -> Result<Audio> {
     let mut r = hound::WavReader::open(path)?;
     let spec = r.spec();

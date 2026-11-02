@@ -133,6 +133,27 @@ fn model_download(app: AppHandle, ch: Channel) {
 }
 
 /// 断开手机：轮换 token，旧二维码立即失效；返回新的扫码地址
+/// 渠道自检：用内置测试语音真跑一次，能拿到非空文字就算通
+#[tauri::command]
+async fn probe_channel(app: AppHandle, ch: Channel) -> serde_json::Value {
+    let engines = crate::session::engines::registry(app.state::<AppState>().qwen.clone());
+    let Some(engine) = engines.get(&ch).cloned() else {
+        return json!({ "ok": false, "error": "未知渠道" });
+    };
+    match engine.probe().await {
+        Ok(p) => {
+            let chars = p.text.chars().count();
+            let ok = chars >= 2;
+            crate::log_info!("自检 {ch:?}：{}ms，{chars} 字", p.ms);
+            json!({ "ok": ok, "ms": p.ms, "text": p.text, "error": if ok { None } else { Some("没有识别结果") } })
+        }
+        Err(e) => {
+            crate::log_warn!("自检 {ch:?} 失败：{e:#}");
+            json!({ "ok": false, "error": format!("{e:#}") })
+        }
+    }
+}
+
 #[tauri::command]
 fn disconnect_phone(app: AppHandle) -> Option<String> {
     let st = app.state::<AppState>();
@@ -154,7 +175,7 @@ fn main() {
             Some(vec!["--minimized"]),
         ))
         .invoke_handler(tauri::generate_handler![
-            get_state, set_settings, model_download, disconnect_phone
+            get_state, set_settings, model_download, disconnect_phone, probe_channel
         ])
         .setup(move |app| {
             let (tx, rx) = mpsc::unbounded_channel();

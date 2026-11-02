@@ -17,6 +17,20 @@
   };
 
   let advanced = $state(false);
+
+  type ProbeState = { state: "idle" | "busy" | "ok" | "fail"; ms?: number; error?: string };
+  let probes = $state<Record<string, ProbeState>>({});
+
+  async function test(e: Event, c: Channel) {
+    e.stopPropagation();
+    probes = { ...probes, [c]: { state: "busy" } };
+    try {
+      const r = await call<{ ok: boolean; ms?: number; error?: string }>("probe_channel", { ch: c });
+      probes = { ...probes, [c]: r.ok ? { state: "ok", ms: r.ms } : { state: "fail", error: r.error ?? "失败" } };
+    } catch (err) {
+      probes = { ...probes, [c]: { state: "fail", error: String(err) } };
+    }
+  }
 </script>
 
 <h1>渠道</h1>
@@ -31,6 +45,9 @@
         <ChIcon ch={c} />
         <b>{CH[c].name}</b>
         {#if cur}<span class="tagcur">当前</span>{/if}
+        <span class="probe" role="button" tabindex="-1" onclick={(e) => test(e, c)} onkeydown={() => {}}>
+          {probes[c]?.state === "busy" ? "测试中" : "测试"}
+        </span>
       </div>
       <p>{CH[c].desc}</p>
       <div class="tags">
@@ -42,6 +59,14 @@
           {/if}
         {/if}
       </div>
+      {#if probes[c] && probes[c].state !== "idle"}
+        <div class="pst {probes[c].state}">
+          {#if probes[c].state === "busy"}<span class="spin"></span> 正在用测试语音识别…
+          {:else if probes[c].state === "ok"}链路正常 · {probes[c].ms}ms
+          {:else}{probes[c].error}
+          {/if}
+        </div>
+      {/if}
       {#if cur && LOCAL[c] && m.state !== "ready"}
         <div class="dl">
           {#if m.state === "downloading"}
@@ -103,6 +128,16 @@
   }
   .pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); }
   .pill.err { color: var(--err); border-color: color-mix(in srgb, var(--err) 35%, transparent); }
+
+  .probe {
+    margin-left: 8px; font-size: var(--fs-tag); color: var(--fg-3);
+    border: 1px solid var(--line); border-radius: var(--r-pill); padding: 0 8px; cursor: pointer;
+  }
+  .probe:hover { color: var(--accent); border-color: var(--accent); }
+  .probe:focus, .probe:focus-visible { outline: none; }
+  .pst { margin-top: 8px; display: flex; align-items: center; gap: 6px; font-size: var(--fs-tag); color: var(--fg-2); }
+  .pst.ok { color: var(--ok); }
+  .pst.fail { color: var(--err); }
 
   .dl { margin-top: 9px; display: flex; align-items: center; gap: 8px; font-size: var(--fs-tag); color: var(--fg-2); }
   .bar { flex: 1; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
