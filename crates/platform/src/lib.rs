@@ -9,7 +9,7 @@ mod win;
 #[cfg(windows)]
 use win as imp;
 
-pub use imp::{backspace, paste};
+pub use imp::{backspace, input_blocked, paste, Pasted};
 
 /// 边说边上屏：与已打出的文本比对，退格删掉分歧部分再补打新内容（不经剪贴板）
 #[derive(Default)]

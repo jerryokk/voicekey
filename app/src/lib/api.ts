@@ -25,7 +25,12 @@ export interface Settings {
 export interface OfflineStatus { state: "missing" | "downloading" | "ready" | "failed"; progress?: number; error?: string }
 
 /** 手机接入：地址要等隧道就绪才有，二维码由后端生成成 SVG */
-export interface Remote { url: string | null; qr: string | null; state?: "starting" | "ready" | "failed"; error?: string | null; lanOnly?: boolean }
+export interface Remote {
+  url: string | null; qr: string | null;
+  state?: "starting" | "ready" | "failed";
+  error?: string | null;
+  lanOnly?: boolean;
+}
 
 export interface Last { text: string; channel: Channel; at: number; ms: number | null }
 

@@ -53,15 +53,7 @@ pub fn find(explicit: Option<PathBuf>) -> Option<PathBuf> {
 }
 
 pub async fn start(exe: &Path, local_origin: &str) -> Result<Tunnel, String> {
-    if !exe.is_file() {
-        return Err(format!("隧道程序不存在：{}", exe.display()));
-    }
-    // 临时配置只为把 metrics 端口设成 0，否则第二个实例会和第一个抢默认端口
-    let config = std::env::temp_dir().join(format!("voicekey-cloudflared-{}.yml", std::process::id()));
-    std::fs::File::create(&config)
-        .and_then(|mut f| f.write_all(b"metrics: 127.0.0.1:0\n"))
-        .map_err(|e| format!("无法写隧道配置：{e}"))?;
-
+    let config = temp_config()?;
     let mut cmd = Command::new(exe);
     cmd.arg("tunnel")
         .arg("--config")
@@ -77,27 +69,66 @@ pub async fn start(exe: &Path, local_origin: &str) -> Result<Tunnel, String> {
         .arg("--max-edge-addr-retries")
         .arg("0")
         .arg("--url")
-        .arg(local_origin)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .arg(local_origin);
+    hide_window(&mut cmd);
+
+    let mut child = cmd.spawn().map_err(|e| spawn_error(exe, e))?;
+    let found = wait_first(child.stdout.take(), child.stderr.take(), |line| quick_origin(line)).await;
+    let _ = std::fs::remove_file(&config);
+    finish(child, found, "cloudflared 在分配地址前退出了，请检查网络")
+}
+
+fn temp_config() -> Result<PathBuf, String> {
+    let config = std::env::temp_dir().join(format!("voicekey-cloudflared-{}.yml", std::process::id()));
+    std::fs::File::create(&config)
+        .and_then(|mut f| f.write_all(b"metrics: 127.0.0.1:0\n"))
+        .map_err(|e| format!("无法写隧道配置：{e}"))?;
+    Ok(config)
+}
+
+fn spawn_error(exe: &Path, e: std::io::Error) -> String {
+    if !exe.is_file() {
+        format!("隧道程序不存在：{}", exe.display())
+    } else {
+        format!("cloudflared 启动失败：{e}")
+    }
+}
+
+fn hide_window(cmd: &mut Command) {
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+}
 
-    let mut child = cmd.spawn().map_err(|e| format!("cloudflared 启动失败：{e}"))?;
-    let out = child.stdout.take();
-    let err = child.stderr.take();
-    let found = tokio::time::timeout(STARTUP_TIMEOUT, first_origin(out, err)).await;
-    let _ = std::fs::remove_file(&config);
+async fn wait_first<F>(
+    stdout: Option<tokio::process::ChildStdout>,
+    stderr: Option<tokio::process::ChildStderr>,
+    match_line: F,
+) -> Result<(Option<String>, Option<String>), tokio::time::error::Elapsed>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    tokio::time::timeout(STARTUP_TIMEOUT, first_match(stdout, stderr, match_line)).await
+}
 
+fn finish(
+    mut child: Child,
+    found: Result<(Option<String>, Option<String>), tokio::time::error::Elapsed>,
+    early_exit: &str,
+) -> Result<Tunnel, String> {
     match found {
-        Ok(Some(origin)) => Ok(Tunnel { child, origin }),
-        Ok(None) => {
+        Ok((Some(origin), _)) => Ok(Tunnel { child, origin }),
+        Ok((None, detail)) => {
             let _ = child.start_kill();
-            Err("cloudflared 在分配地址前退出了，请检查网络".into())
+            let reason = detail.unwrap_or_default();
+            // 429 是最常见的一种：临时域名有配额，被限流时换个说法用户才知道该怎么办
+            if reason.contains("429") {
+                return Err("Cloudflare 临时域名限流（429），新建隧道太频繁，稍后会自动恢复".into());
+            }
+            Err(if reason.is_empty() { early_exit.into() } else { format!("{early_exit}（{reason}）") })
         }
         Err(_) => {
             let _ = child.start_kill();
@@ -108,10 +139,16 @@ pub async fn start(exe: &Path, local_origin: &str) -> Result<Tunnel, String> {
 
 /// 两个管道都要读：cloudflared 会同时往 stdout 和 stderr 写，
 /// 只读一个会让另一个写满管道后把它卡死。
-async fn first_origin(
+/// 返回 (匹配到的地址, 进程退出前最后一条错误)。
+/// 只回「进程退出了」等于什么都没说——真实原因（限流、DNS、鉴权）就在日志里。
+async fn first_match<F>(
     stdout: Option<tokio::process::ChildStdout>,
     stderr: Option<tokio::process::ChildStderr>,
-) -> Option<String> {
+    match_line: F,
+) -> (Option<String>, Option<String>)
+where
+    F: Fn(&str) -> Option<String>,
+{
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     if let Some(s) = stdout {
         tokio::spawn(drain(s, tx.clone()));
@@ -120,12 +157,30 @@ async fn first_origin(
         tokio::spawn(drain(s, tx.clone()));
     }
     drop(tx);
+    let mut detail = None;
     while let Some(line) = rx.recv().await {
-        if let Some(origin) = quick_origin(&line) {
-            return Some(origin);
+        if let Some(origin) = match_line(&line) {
+            return (Some(origin), detail);
+        }
+        if detail.is_none() && looks_like_error(&line) {
+            detail = Some(readable(&line));
         }
     }
-    None
+    (None, detail)
+}
+
+fn looks_like_error(line: &str) -> bool {
+    line.contains("\"level\":\"error\"") || line.contains("failed") || line.contains(" ERR ")
+}
+
+/// json 日志取 msg 字段，纯文本日志截一段：两种情况都别把整行 json 甩给用户
+fn readable(line: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+        if let Some(m) = v.get("msg").and_then(|m| m.as_str()) {
+            return m.to_string();
+        }
+    }
+    line.trim().chars().take(160).collect()
 }
 
 async fn drain<R>(reader: R, tx: tokio::sync::mpsc::UnboundedSender<String>)

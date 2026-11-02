@@ -1,7 +1,7 @@
 //! 手机接入：拉起本地服务与隧道，把设备事件转成会话消息。
 //!
-//! 服务的生命周期等于应用的生命周期：随启动拉起，随退出消失。隧道地址每次启动都会变，
-//! 所以拿到地址后要立刻告诉前端刷新二维码。
+//! 服务的生命周期等于应用的生命周期：随启动拉起，随退出消失。临时隧道地址每次启动
+//! 都会变，所以拿到地址后要立刻告诉前端刷新二维码。
 
 use crate::controller::Msg;
 use crate::{AppState, RemoteStatus};
@@ -35,7 +35,6 @@ pub fn spawn(app: AppHandle) {
             }
         };
 
-        let url = service.url();
         // 只打域名，不打带 token 的完整地址：控制台截图、日志上报都会把它带出去
         crate::log_info!("手机接入已就绪：{}", service.origin());
         let lan_only = service.origin().starts_with("http://127.0.0.1");
@@ -45,10 +44,11 @@ pub fn spawn(app: AppHandle) {
         {
             let st = app.state::<AppState>();
             *st.remote.write().unwrap() = Some(service.handle());
-            *st.remote_url.write().unwrap() = Some(url);
+            *st.remote_url.write().unwrap() = Some(service.url());
             *st.remote_origin.write().unwrap() = Some(service.origin().to_string());
         }
-        set_status(&app, RemoteStatus { state: "ready", error: None, lan_only });
+        let error = service.tunnel_error().map(|e| e.to_string());
+        set_status(&app, RemoteStatus { state: "ready", error, lan_only });
 
         while let Some(event) = service.next_event().await {
             // 音频只在按下这一刻取：取早了是上一句的，取晚了会被下一句覆盖

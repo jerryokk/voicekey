@@ -63,6 +63,7 @@
 <div id="app">
   <div id="bar"><span id="dot"></span><span id="state">未连接</span><span id="hint"></span></div>
   <div id="text"><span class="ph">按住下方按钮说话，电脑端会收到音频。</span></div>
+  <div id="note" class="hide"></div>
   <div id="rows" class="hide"></div>
   <div id="ctl">
     <button id="del" aria-label="退格">
@@ -86,6 +87,16 @@ const token = new URLSearchParams(location.search).get('t') || '';
 const RATE = 16000, FRAME = 320;
 const $ = (id) => document.getElementById(id);
 const textEl = $('text'), talkEl = $('talk'), stateEl = $('state'), dotEl = $('dot'), hintEl = $('hint'), rowsEl = $('rows');
+const noteEl = $('note');
+let noteTimer = 0;
+
+// 电脑侧的原因要说给手机上的人听：他看不到桌面，只能靠这一行判断该怎么办
+function note(text) {
+  noteEl.textContent = text;
+  noteEl.classList.remove('hide');
+  clearTimeout(noteTimer);
+  noteTimer = setTimeout(() => noteEl.classList.add('hide'), 7000);
+}
 
 let ws = null, ctx = null, node = null, stream = null, track = null;
 let kicked = false;
@@ -146,7 +157,8 @@ function connect() {
     } else if (msg.type === 'prefer') {
       // 服务端判定这条链路丢包太多，后面的句子改走回落
       preferPcm = true;
-      setState('已切到回落通道（' + (msg.reason || '') + '）', false);
+      setState('回落通道', false);
+      note('这条链路丢包偏多（' + (msg.reason || '') + '），已切到回落通道，后面的句子会稍慢一点但更准。');
     } else if (msg.type === 'final') {
       textEl.textContent = msg.text || '（没有识别到内容）';
       // 提交了某条候选或单渠道定稿：候选列表的使命结束
@@ -162,6 +174,8 @@ function connect() {
       rowsEl.classList.add('hide');
       setState('已断开', false);
       ws.close();
+    } else if (msg.type === 'notice') {
+      note(msg.text);
     } else if (msg.type === 'error') {
       textEl.textContent = '出错（' + msg.stage + '）：' + msg.message;
       rowsEl.classList.add('hide');

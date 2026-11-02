@@ -83,6 +83,19 @@ impl Ctl {
         }
     }
 
+    /// 上屏，并把「被高权限窗口拦住」如实说出来。
+    /// 被拦下的文字留在剪贴板里，用户按一次 Ctrl+V 就能拿到，不算白说。
+    fn output(&mut self, text: &str, ch: Channel) {
+        if pf::paste(text) != pf::Pasted::Blocked {
+            ui::hud_hide(&self.app, 0);
+            return;
+        }
+        let msg = "目标窗口以管理员权限运行，文字已复制到剪贴板，请按 Ctrl+V";
+        self.publish(serde_json::json!({ "type": "notice", "text": msg }));
+        ui::hud(&self.app, "info", "已复制到剪贴板 · 请手动粘贴", ch);
+        ui::hud_hide(&self.app, 2400);
+    }
+
     /// 记下这一句：连接页要展示「最近一句」，也让失败后能复查
     fn record(&self, text: &str, ch: Channel, ms: Option<u64>) {
         let value = serde_json::json!({
@@ -175,7 +188,16 @@ impl Ctl {
         self.gen += 1;
         self.mode = Mode::Single(ch);
         self.recording = true;
-        self.typer = self.settings().streaming.then(Typer::default);
+        // 高权限窗口收不到任何模拟输入，流式上屏会「看着在录、实际一个字没进」，
+        // 这种时候直接走剪贴板路径，并且明说一句
+        let blocked = pf::input_blocked();
+        self.typer = (self.settings().streaming && !blocked).then(Typer::default);
+        if blocked {
+            self.publish(serde_json::json!({
+                "type": "notice",
+                "text": "当前窗口以管理员权限运行，将改用剪贴板粘贴"
+            }));
+        }
         self.segs = Segments::default();
         let seg = self.segs.start();
         ui::hud(&self.app, "listen", "", ch);
@@ -335,7 +357,7 @@ impl Ctl {
                 }
                 if let Some(e) = error {
                     if !streamed && !text.is_empty() {
-                        pf::paste(&text);
+                        self.output(&text, ch);
                     }
                     let msg = if text.is_empty() {
                         format!("识别失败：{e}")
@@ -348,12 +370,17 @@ impl Ctl {
                     ui::hud_hide(&self.app, 0);
                     self.publish(serde_json::json!({ "type": "final", "text": text }));
                 } else if text.is_empty() {
+                    // 桌面上只有一行"没有识别到内容"，手机上什么原因都看不到，
+                    // 所以给一句能立刻照做的话
+                    self.publish(serde_json::json!({
+                        "type": "notice",
+                        "text": "没听清：靠近手机再说一次，或在电脑上换个渠道试试"
+                    }));
                     ui::hud(&self.app, "info", "没有识别到内容", ch);
                     ui::hud_hide(&self.app, 1000);
                     self.publish(serde_json::json!({ "type": "final", "text": "" }));
                 } else {
-                    ui::hud_hide(&self.app, 0);
-                    pf::paste(&text);
+                    self.output(&text, ch);
                     self.record(&text, ch, None);
                     self.publish(serde_json::json!({ "type": "final", "text": text }));
                 }
@@ -423,15 +450,19 @@ impl Ctl {
             return;
         }
         let streamed = self.typer.is_some();
-        let partial = match self.mode {
-            Mode::Single(_) => self.segs.text(),
-            Mode::Pick => self.rows.get(self.sel).map(|r| r.text.clone()).unwrap_or_default(),
-            Mode::Idle => String::new(),
+        let (partial, ch) = match self.mode {
+            Mode::Single(ch) => (self.segs.text(), ch),
+            Mode::Pick => {
+                let row = self.rows.get(self.sel);
+                let text = row.map(|r| r.text.clone()).unwrap_or_default();
+                (text, row.map(|r| r.channel).unwrap_or_else(|| self.settings().channel))
+            }
+            Mode::Idle => (String::new(), self.settings().channel),
         };
         self.cancel();
         // 超时打断时，非流式还没写进输入框的中间结果补上；用户主动取消不补写
         if message.is_some() && !streamed && !partial.is_empty() {
-            pf::paste(&partial);
+            self.output(&partial, ch);
         }
         match message {
             Some(m) => {
@@ -489,7 +520,7 @@ impl Ctl {
             *s.pick_counts.entry(ch).or_default() += 1;
         });
         self.cancel();
-        pf::paste(&text);
+        self.output(&text, ch);
         self.record(&text, ch, None);
         self.publish(serde_json::json!({ "type": "final", "text": text }));
     }

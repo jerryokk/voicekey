@@ -49,7 +49,7 @@
   </div>
   <p class="detail">
     {#if failed}
-      {remote.lanOnly ? "网络连不上 Cloudflare，检查网络后重启应用。" : (remote.error ?? "未知错误")}
+      {remote.error ?? (remote.lanOnly ? "公网隧道没有建立，手机暂时连不上。" : "未知错误")}
     {:else if remote.qr}
       地址每次启动都会变；断开手机后旧二维码立即失效。
     {:else}

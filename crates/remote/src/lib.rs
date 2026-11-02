@@ -64,7 +64,19 @@ pub struct Service {
     hub: Arc<Hub>,
     events: mpsc::UnboundedReceiver<Event>,
     origin: String,
+    /// 隧道没起来时的原因（限流、DNS、没装 cloudflared）。界面要把它说给用户听，
+    /// 否则用户只看到「连不上」，既不能判断也不能自救。
+    tunnel_error: Option<String>,
+    /// 承载 HTTP/WS 的服务任务。它握着 listener，不显式 abort 的话
+    /// 端口会一直被占着，重新拉起服务时绑不上。
+    server: tokio::task::JoinHandle<()>,
     _tunnel: Option<Tunnel>,
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
 }
 
 impl Service {
@@ -88,6 +100,7 @@ impl Service {
         let local = format!("http://127.0.0.1:{}", config.port);
         let mut origin = local.clone();
         let mut tunnel = None;
+        let mut tunnel_error = None;
         if config.tunnel {
             match tunnel::find(config.cloudflared) {
                 Some(exe) => match tunnel::start(&exe, &local).await {
@@ -95,9 +108,15 @@ impl Service {
                         origin = t.origin().to_string();
                         tunnel = Some(t);
                     }
-                    Err(e) => eprintln!("隧道不可用，仅限局域网访问：{e}"),
+                    Err(e) => {
+                        eprintln!("隧道不可用，仅限局域网访问：{e}");
+                        tunnel_error = Some(e);
+                    }
                 },
-                None => eprintln!("找不到 cloudflared，仅限局域网访问"),
+                None => {
+                    eprintln!("找不到 cloudflared，仅限局域网访问");
+                    tunnel_error = Some("找不到 cloudflared，安装包可能不完整".into());
+                }
             }
         }
 
@@ -105,11 +124,11 @@ impl Service {
             .route("/", get(page))
             .route("/ws", get(ws))
             .with_state(hub.clone());
-        tokio::spawn(async move {
+        let server = tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         });
 
-        Ok(Self { hub, events, origin, _tunnel: tunnel })
+        Ok(Self { hub, events, origin, tunnel_error, server, _tunnel: tunnel })
     }
 
     /// 扫码用的完整地址
@@ -128,6 +147,12 @@ impl Service {
     pub fn origin(&self) -> &str {
         &self.origin
     }
+
+    /// 隧道为什么没起来；隧道正常时为 None
+    pub fn tunnel_error(&self) -> Option<&str> {
+        self.tunnel_error.as_deref()
+    }
+
 
     pub async fn next_event(&mut self) -> Option<Event> {
         self.events.recv().await
