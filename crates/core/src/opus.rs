@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use audiopus_sys as ffi;
+use opus_sys as ffi;
 
 pub const VOIP: i32 = 2048;
 pub const AUDIO: i32 = 2049;

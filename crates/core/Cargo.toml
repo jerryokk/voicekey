@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-audiopus_sys = { version = "0.2", features = ["static"] }
+opus-sys = { path = "../opus-sys" }
 rubato = "0.16"
 hound = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }

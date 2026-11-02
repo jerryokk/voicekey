@@ -63,6 +63,7 @@ node tools/probe/pcm-test.mjs "ws://127.0.0.1:47800/ws?t=<token>" <某个 16k �
 |---|---|
 | `crates/core` | 七个云端引擎（豆包、微信、千问、百度、搜狗、讯飞、Chatterfly）+ 音频重采样分帧 + Opus 编码 |
 | `crates/remote` | 手机接入：axum 服务、WS 信令、WebRTC 收流、Opus 解码、隧道 |
+| `crates/opus-sys` | libopus 预编译静态库 + 最小 FFI（7 个函数），编码（发云端）与解码（收手机音频）共用 |
 | `crates/platform` | 只做一件事：把文字打进当前前台窗口（剪贴板 + Ctrl+V），以及边说边上屏的 `Typer` |
 | `crates/wtlocal` | 微信离线：纯 Rust 加载官方 xnet 模型 |
 | `app/src-tauri` | 桌面壳：会话状态机、托盘、浮层、设置、更新 |
@@ -108,7 +109,7 @@ node tools/probe/pcm-test.mjs "ws://127.0.0.1:47800/ws?t=<token>" <某个 16k �
 
 ## 约定与易错点
 
-- **cmake 是构建前置**：`audiopus_sys` 要从源码编 libopus。本机已把真实 cmake 写进**用户环境变量 `CMAKE`**（cargo 的 cmake 构建脚本原生认它；已验证：设了就能编，不设就挂在 pip 装的坏壳子 `Scripts\cmake.exe` 上）。CI 用 choco 装。**别把 cmake 加进 PATH**——坏壳子会抢先。
+- **构建零外部工具**：libopus 是预编译静态库，随 `crates/opus-sys/lib/` 分发，build.rs 只输出链接指令。整条链路只需要 rustc + MSVC linker + node，没有 cmake / bindgen / pkg-config。换 MSVC 大版本或升级 libopus 才需要重新生成 `opus.lib`（方法见 `crates/opus-sys/README.md`）。
 - `cloudflared.exe` 放在 `app/src-tauri/binaries/`（不进 git，CI 下载）。运行时按四处查找：资源目录 → 程序目录的 `runtime/tunnel/` → **编译期记下的 `app/src-tauri/binaries/`** → PATH。所以 `cargo run` 或直接跑 `target/debug/voicekey.exe` 都不需要先拷文件。
 - 隧道启动参数不能省：`--protocol auto`（默认只走 QUIC，屏蔽 UDP 的网络起不来）、`metrics: 127.0.0.1:0`（否则第二个实例抢端口）、stdout 与 stderr 都要读（只读一个会把 cloudflared 卡死）。
 - 从 cloudflared 日志里抠域名时要求名称含连字符，否则会把 `api.trycloudflare.com` 当成隧道地址。

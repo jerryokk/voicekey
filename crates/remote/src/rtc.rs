@@ -189,7 +189,7 @@ impl Receiver {
 /// Opus 解码器：浏览器发的是 48kHz，直接解到 16kHz 单声道——
 /// 省掉一次重采样，且 20ms 正好 320 样本，正好是 Engine 要的帧长。
 struct Decoder {
-    dec: *mut audiopus_sys::OpusDecoder,
+    dec: *mut opus_sys::OpusDecoder,
     buf: Vec<i16>,
 }
 
@@ -198,7 +198,7 @@ unsafe impl Send for Decoder {}
 impl Decoder {
     fn new() -> Result<Self, String> {
         let mut err = 0;
-        let dec = unsafe { audiopus_sys::opus_decoder_create(16_000, 1, &mut err) };
+        let dec = unsafe { opus_sys::opus_decoder_create(16_000, 1, &mut err) };
         if dec.is_null() || err != 0 {
             return Err(format!("Opus 解码器创建失败：{err}"));
         }
@@ -208,7 +208,7 @@ impl Decoder {
 
     fn decode(&mut self, payload: &[u8]) -> Result<Vec<i16>, String> {
         let n = unsafe {
-            audiopus_sys::opus_decode(
+            opus_sys::opus_decode(
                 self.dec,
                 payload.as_ptr(),
                 payload.len() as i32,
@@ -226,7 +226,7 @@ impl Decoder {
 
 impl Drop for Decoder {
     fn drop(&mut self) {
-        unsafe { audiopus_sys::opus_decoder_destroy(self.dec) }
+        unsafe { opus_sys::opus_decoder_destroy(self.dec) }
     }
 }
 

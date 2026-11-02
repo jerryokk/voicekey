@@ -31,10 +31,6 @@ jobs:
         with:
           key: x86_64-pc-windows-msvc
 
-      # voicekey-core 依赖 audiopus_sys，它要用 cmake 从源码编 libopus
-      - name: cmake
-        run: choco install cmake --install-arguments="ADD_CMAKE_TO_PATH=System" --no-progress -y
-
       - name: Version
         run: |
           VER="${GITHUB_REF_NAME#v}"
