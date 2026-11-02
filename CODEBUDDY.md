@@ -16,7 +16,13 @@ VoiceKey 是 Windows 上的语音输入工具。**音频来源是手机**：手�
 ```
 app/                 Tauri 外壳 + Svelte 界面
   src/               设置页、浮层
-  src-tauri/         会话状态机、托盘、手机接入装配
+  src-tauri/
+    main.rs          启动装配（插件、setup、窗口事件）
+    ipc.rs           前端能调的全部命令，唯一接口面
+    state.rs         AppState + update_settings（改设置的唯一入口）
+    controller.rs    会话编排（调引擎、HUD、上屏、广播）
+    session/         types（分段/候选数据结构）、machine（选行与代际，可单测）、engines
+    ui.rs            托盘、浮层、两个窗口、坐标换算
     binaries/        cloudflared.exe 放这里（不进 git，打包时映射到资源目录）
 crates/
   core/              七家识别协议、音频分帧、Opus 编码
