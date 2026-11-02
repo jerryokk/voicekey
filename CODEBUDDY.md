@@ -20,7 +20,7 @@ app/                 Tauri 外壳 + Svelte 界面
     binaries/        cloudflared.exe 放这里（不进 git，打包时映射到资源目录）
 crates/
   core/              七家识别协议、音频分帧、Opus 编码
-  remote/            本地服务、WS 信令、WebRTC 收流、隧道、手机页面
+  remote/            本地服务、WS 信令（protocol.rs 是唯一契约）、WebRTC、隧道、手机页
   platform/          上屏（剪贴板 + Ctrl+V）
   wtlocal/           微信离线推理
 tools/
@@ -42,7 +42,7 @@ app/src-tauri/binaries/cloudflared.exe
 
 # 测试
 cargo test --workspace             # 引擎协议、音频分帧、隧道地址解析、丢包统计、会话状态机
-cargo test -p voicekey             # 只跑会话状态机（controller）
+cargo test -p voicekey             # 会话状态机（含 machine.rs 的选行/代际测试）
 cargo test -p voicekey-remote      # 只跑接入层（rtc / tunnel）
 
 # 命令行验证识别链路（WAV 需 16kHz 单声道）
@@ -83,7 +83,17 @@ node tools/probe/pcm-test.mjs "ws://127.0.0.1:47800/ws?t=<token>" <某个 16k �
 - 回落：页面把 16k Int16 按 320 样本打包成二进制发过来；只在 `iceConnectionState` 起不来或丢包 >5% 时用
 - 丢包率按 RTP seq 缺口算。**超过 5% 就会让页面下次改走回落**——Opus 丢包不会断连，只会悄悄污染解码器状态，文字看着正常但其实是错的
 
-### 会话状态机（`app/src-tauri/src/controller.rs`）
+### 会话状态机（`session/machine.rs` + `controller.rs`）
+
+不碰 I/O 的判断都在 `session/machine.rs`，可直接单测：
+
+- `Tickets`：代际与超时票号。引擎回结果可能晚于用户开下一句，代号对不上就作废。
+- `Picker`：多渠道候选的行构建（排序 / 跳过未下载模型 / 沿用上次选择）、
+  定稿后焦点怎么挪、点击一条是「上屏 / 只切焦点 / 抖动提示」。
+
+`controller.rs` 只剩编排（调引擎、HUD、上屏、广播）。改这两块的判断逻辑前先看
+`machine.rs` 里的测试——它们覆盖了多设备、渠道失败、用户手选与自动切换打架这几种情况。
+
 
 `Ctl` 是唯一的状态持有者，所有输入都是 `Msg`：
 

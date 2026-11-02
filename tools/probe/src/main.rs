@@ -88,6 +88,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("收到退格 ×{n}（NO_PASTE，未发送按键）");
                 }
             }
+            Event::Undo => {
+                if paste {
+                    let _ = tokio::task::spawn_blocking(voicekey_platform::undo).await;
+                    println!("收到撤销（已发送 Ctrl+Z）");
+                } else {
+                    println!("收到撤销（NO_PASTE，未发送按键）");
+                }
+            }
             Event::Abort(reason) => {
                 handle.publish(json!({ "type": "error", "stage": "session", "message": reason }));
             }

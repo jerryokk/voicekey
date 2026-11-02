@@ -3,7 +3,8 @@
 //! 状态机本身没变（Mode / gen / Segments / 超时 / 33ms 节流都是原来那套），
 //! 变的只是「谁开始一句话」：以前是全局快捷键加电脑麦克风，现在是手机端的 Press/Release，
 //! 音频由 `voicekey-remote` 交过来。用户松手就是结束，所以静音自动结束那套判定没有了。
-use crate::session::types::{Mode, Model, Row, RowState, Segments};
+use crate::session::machine::{Choice, Picker, Tickets};
+use crate::session::types::{Mode, Model, Segments};
 use crate::settings::{Channel, Settings};
 use crate::ui;
 use crate::AppState;
@@ -15,7 +16,11 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use voicekey_core::{Audio, Engine, QwenEngine};
 use voicekey_platform::{self as pf, Typer};
+use voicekey_remote::protocol;
 use voicekey_remote::{Event as RemoteEvent, Handle as RemoteHandle};
+
+/// 撤销时间窗：与手机页那个按钮的存活时间一致
+const UNDO_WINDOW: Duration = Duration::from_secs(8);
 
 pub enum Msg {
     /// 手机端事件，Press 时附带本句的音频流
@@ -33,20 +38,21 @@ pub struct Ctl {
     remote: Arc<RwLock<Option<RemoteHandle>>>,
     engines: HashMap<Channel, Arc<dyn Engine>>,
     tasks: Vec<JoinHandle<()>>,
-    gen: u64,
-    timeout_token: u64,
+    /// 代际与超时票根：迟到的结果靠它作废
+    tickets: Tickets,
     mode: Mode,
     /// 手机正按着
     recording: bool,
     typer: Option<Typer>,
+    /// 单渠道会话的分段文本
     segs: Segments,
-    rows: Vec<Row>,
-    row_segs: Vec<Segments>,
-    sel: usize,
-    user_picked: bool,
+    /// 多渠道候选（含每行的分段、排序、选中项）
+    picker: Picker,
     last_emit: Instant,
     flush_pending: bool,
     released_at: Option<Instant>,
+    /// 上一次把文字打进前台窗口的时刻。撤销要卡时间窗，否则会撤到别的东西上
+    last_output: Option<Instant>,
 }
 
 pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) {
@@ -59,19 +65,16 @@ pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) 
         app: app.clone(),
         engines,
         tasks: Vec::new(),
-        gen: 0,
-        timeout_token: 0,
+        tickets: Tickets::default(),
         mode: Mode::Idle,
         recording: false,
         typer: None,
         segs: Segments::default(),
-        rows: Vec::new(),
-        row_segs: Vec::new(),
-        sel: 0,
-        user_picked: false,
+        picker: Picker::new(Vec::new(), |_| false, None, &std::collections::HashMap::new()),
         last_emit: Instant::now(),
         flush_pending: false,
         released_at: None,
+        last_output: None,
     };
     tauri::async_runtime::spawn(ctl.run(rx));
 }
@@ -87,11 +90,12 @@ impl Ctl {
     /// 被拦下的文字留在剪贴板里，用户按一次 Ctrl+V 就能拿到，不算白说。
     fn output(&mut self, text: &str, ch: Channel) {
         if pf::paste(text) != pf::Pasted::Blocked {
+            self.last_output = Some(Instant::now());
             ui::hud_hide(&self.app, 0);
             return;
         }
         let msg = "目标窗口以管理员权限运行，文字已复制到剪贴板，请按 Ctrl+V";
-        self.publish(serde_json::json!({ "type": "notice", "text": msg }));
+        self.publish(protocol::notice(msg));
         ui::hud(&self.app, "info", "已复制到剪贴板 · 请手动粘贴", ch);
         ui::hud_hide(&self.app, 2400);
     }
@@ -125,9 +129,9 @@ impl Ctl {
     fn handle(&mut self, m: Msg) {
         match m {
             Msg::Remote(e, audio) => self.remote_event(e, audio),
-            Msg::Partial { gen, ch, seg, text } if gen == self.gen => self.partial(ch, seg, text),
-            Msg::Done { gen, ch, seg, res } if gen == self.gen => self.done(ch, seg, res),
-            Msg::Timeout { token } if token == self.timeout_token && self.mode != Mode::Idle => {
+            Msg::Partial { gen, ch, seg, text } if self.tickets.accepts(gen) => self.partial(ch, seg, text),
+            Msg::Done { gen, ch, seg, res } if self.tickets.accepts(gen) => self.done(ch, seg, res),
+            Msg::Timeout { token } if self.tickets.timeout_is_current(token) && self.mode != Mode::Idle => {
                 self.abort(Some("识别超时".into()))
             }
             Msg::Flush => {
@@ -148,6 +152,7 @@ impl Ctl {
                 }
             }
             RemoteEvent::Commit(channel) => self.commit(&channel),
+            RemoteEvent::Undo => self.undo(),
             // 说到一半不给删：流式打字机记着已打的字数，外部退格会让它失准
             RemoteEvent::Erase(n) if !self.recording => pf::backspace(n as usize),
             RemoteEvent::Erase(_) => {}
@@ -185,7 +190,7 @@ impl Ctl {
     }
 
     fn begin_single(&mut self, ch: Channel, audio: Audio) {
-        self.gen += 1;
+        self.tickets.next_generation();
         self.mode = Mode::Single(ch);
         self.recording = true;
         // 高权限窗口收不到任何模拟输入，流式上屏会「看着在录、实际一个字没进」，
@@ -193,10 +198,7 @@ impl Ctl {
         let blocked = pf::input_blocked();
         self.typer = (self.settings().streaming && !blocked).then(Typer::default);
         if blocked {
-            self.publish(serde_json::json!({
-                "type": "notice",
-                "text": "当前窗口以管理员权限运行，将改用剪贴板粘贴"
-            }));
+            self.publish(protocol::notice("当前窗口以管理员权限运行，将改用剪贴板粘贴"));
         }
         self.segs = Segments::default();
         let seg = self.segs.start();
@@ -204,42 +206,16 @@ impl Ctl {
         self.spawn_engine(ch, seg, audio);
     }
 
-    fn begin_multi(&mut self, mut channels: Vec<Channel>, audio: Audio) {
-        let n = self.settings().pick_counts;
-        channels.sort_by_key(|c| std::cmp::Reverse(n.get(&c).copied().unwrap_or(0)));
-        self.gen += 1;
+    fn begin_multi(&mut self, channels: Vec<Channel>, audio: Audio) {
+        let s = self.settings();
+        self.tickets.next_generation();
         self.mode = Mode::Pick;
         self.recording = true;
-        self.sel = 0;
-        self.user_picked = false;
         self.released_at = None;
-        self.rows = channels
-            .into_iter()
-            .map(|ch| {
-                let skip = !crate::model_ready(ch);
-                Row {
-                    channel: ch,
-                    text: if skip { "离线模型未下载，已跳过".into() } else { String::new() },
-                    state: if skip { RowState::Skip } else { RowState::Listen },
-                    ms: None,
-                }
-            })
-            .collect();
-        self.row_segs = self.rows.iter().map(|_| Segments::default()).collect();
-        let targets = self
-            .rows
-            .iter()
-            .zip(&mut self.row_segs)
-            .filter(|(r, _)| r.state == RowState::Listen)
-            .map(|(r, segs)| (r.channel, segs.start()))
-            .collect();
+        // 行的排序、跳过、默认焦点都在 Picker 里，这里只负责把音频扇出去
+        self.picker = Picker::new(channels, crate::model_ready, s.last_pick, &s.pick_counts);
+        let targets = self.picker.start_round();
         self.fan_out(audio, targets);
-        // 默认选中上次用的渠道
-        let last = self.settings().last_pick;
-        if let Some(i) = self.rows.iter().position(|r| Some(r.channel) == last && r.state == RowState::Listen) {
-            self.sel = i;
-            self.user_picked = true;
-        }
         self.emit_rows();
     }
 
@@ -249,22 +225,14 @@ impl Ctl {
             return;
         }
         self.recording = true;
-        self.timeout_token += 1;
+        self.tickets.next_timeout();
         if let Mode::Single(ch) = self.mode {
             let seg = self.segs.start();
             self.hud_single(ch);
             return self.spawn_engine(ch, seg, audio);
         }
         self.released_at = None;
-        let mut targets = Vec::new();
-        for (r, segs) in self.rows.iter_mut().zip(&mut self.row_segs) {
-            if r.state == RowState::Skip {
-                continue;
-            }
-            targets.push((r.channel, segs.start()));
-            r.state = RowState::Listen;
-            r.text = segs.text();
-        }
+        let targets = self.picker.start_round();
         self.fan_out(audio, targets);
         self.emit_rows();
     }
@@ -292,7 +260,7 @@ impl Ctl {
 
     fn spawn_engine(&mut self, ch: Channel, seg: usize, audio: Audio) {
         let Some(engine) = self.engines.get(&ch).cloned() else { return };
-        let (gen, tx) = (self.gen, self.tx.clone());
+        let (gen, tx) = (self.tickets.generation(), self.tx.clone());
         self.tasks.push(tauri::async_runtime::spawn(async move {
             let ptx = tx.clone();
             let partial = Box::new(move |t: &str| {
@@ -315,15 +283,11 @@ impl Ctl {
                 }
                 let text = self.segs.text();
                 // 人盯着手机看，实时文字必须发到手机上去
-                self.publish(serde_json::json!({ "type": "partial", "text": text }));
+                self.publish(protocol::partial(text));
                 self.hud_single(ch);
             }
             Mode::Pick => {
-                if let Some(i) = self.rows.iter().position(|r| r.channel == ch) {
-                    if self.row_segs[i].partial(seg, text).is_some() {
-                        self.rows[i].text = self.row_segs[i].text();
-                    }
-                }
+                self.picker.on_partial(ch, seg, text);
                 self.emit_rows();
             }
             Mode::Idle => {}
@@ -342,7 +306,7 @@ impl Ctl {
                     return;
                 }
                 self.recording = false;
-                self.timeout_token += 1;
+                self.tickets.next_timeout();
                 self.tasks.clear();
                 self.mode = Mode::Idle;
                 let typer = self.typer.take();
@@ -364,51 +328,30 @@ impl Ctl {
                     } else {
                         format!("识别失败：{e}，已保留已识别的文字")
                     };
-                    self.publish(serde_json::json!({ "type": "error", "stage": "asr", "message": msg }));
+                    self.publish(protocol::error("asr", msg.as_str()));
                     ui::hud_error(&self.app, &msg);
                 } else if streamed {
                     ui::hud_hide(&self.app, 0);
-                    self.publish(serde_json::json!({ "type": "final", "text": text }));
+                    self.publish(protocol::fin(text));
                 } else if text.is_empty() {
                     // 桌面上只有一行"没有识别到内容"，手机上什么原因都看不到，
                     // 所以给一句能立刻照做的话
-                    self.publish(serde_json::json!({
-                        "type": "notice",
-                        "text": "没听清：靠近手机再说一次，或在电脑上换个渠道试试"
-                    }));
+                    self.publish(protocol::notice("没听清：靠近手机再说一次，或在电脑上换个渠道试试"));
                     ui::hud(&self.app, "info", "没有识别到内容", ch);
                     ui::hud_hide(&self.app, 1000);
-                    self.publish(serde_json::json!({ "type": "final", "text": "" }));
+                    self.publish(protocol::fin(""));
                 } else {
                     self.output(&text, ch);
                     self.record(&text, ch, None);
-                    self.publish(serde_json::json!({ "type": "final", "text": text }));
+                    self.publish(protocol::fin(text));
                 }
             }
             Mode::Pick => {
                 let ms = self.released_at.map(|t| t.elapsed().as_millis() as u64);
-                let Some(i) = self.rows.iter().position(|r| r.channel == ch) else { return };
-                let segs = &mut self.row_segs[i];
-                segs.done(seg, res, false);
-                let text = segs.text();
-                let r = &mut self.rows[i];
-                if !segs.finished() {
-                    r.text = text;
-                } else if !text.is_empty() {
-                    r.text = text;
-                    r.state = RowState::Final;
-                    r.ms = Some(ms.unwrap_or(0));
-                } else {
-                    r.text = segs.error.clone().unwrap_or_else(|| "没有识别到内容".into());
-                    r.state = RowState::Error;
-                }
-                let cur = self.rows[self.sel].state;
-                let fallback = !self.user_picked || matches!(cur, RowState::Error | RowState::Skip);
-                if self.rows[i].state == RowState::Final && fallback && cur != RowState::Final {
-                    self.sel = i;
-                }
-                if !self.rows.iter().any(|r| matches!(r.state, RowState::Listen | RowState::Wait)) {
-                    self.timeout_token += 1;
+                self.picker.on_done(ch, seg, res, ms);
+                // 全都不在识别中了：把「等定稿」的超时撤掉，免得误报
+                if self.picker.all_settled() {
+                    self.tickets.next_timeout();
                 }
                 self.emit_rows();
             }
@@ -427,17 +370,13 @@ impl Ctl {
             Mode::Single(ch) => ui::hud(&self.app, "wait", "", ch),
             Mode::Pick => {
                 self.released_at = Some(Instant::now());
-                for r in &mut self.rows {
-                    if r.state == RowState::Listen {
-                        r.state = RowState::Wait;
-                    }
-                }
+                self.picker.release();
                 self.emit_rows();
             }
             Mode::Idle => return,
         }
-        self.timeout_token += 1;
-        let (token, tx) = (self.timeout_token, self.tx.clone());
+        let token = self.tickets.next_timeout();
+        let tx = self.tx.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(Duration::from_secs(15)).await;
             let _ = tx.send(Msg::Timeout { token });
@@ -453,9 +392,7 @@ impl Ctl {
         let (partial, ch) = match self.mode {
             Mode::Single(ch) => (self.segs.text(), ch),
             Mode::Pick => {
-                let row = self.rows.get(self.sel);
-                let text = row.map(|r| r.text.clone()).unwrap_or_default();
-                (text, row.map(|r| r.channel).unwrap_or_else(|| self.settings().channel))
+                self.picker.selected().unwrap_or_else(|| (String::new(), self.settings().channel))
             }
             Mode::Idle => (String::new(), self.settings().channel),
         };
@@ -467,7 +404,7 @@ impl Ctl {
         match message {
             Some(m) => {
                 let text = if partial.is_empty() { m } else { format!("{m}，已保留已识别的文字") };
-                self.publish(serde_json::json!({ "type": "error", "stage": "session", "message": text }));
+                self.publish(protocol::error("session", text.as_str()));
                 ui::hud_error(&self.app, &text);
             }
             None => ui::hud_hide(&self.app, 0),
@@ -475,8 +412,8 @@ impl Ctl {
     }
 
     fn cancel(&mut self) {
-        self.gen += 1;
-        self.timeout_token += 1;
+        self.tickets.next_generation();
+        self.tickets.next_timeout();
         for t in self.tasks.drain(..) {
             t.abort();
         }
@@ -487,42 +424,59 @@ impl Ctl {
         self.mode = Mode::Idle;
     }
 
+    /// 撤销上一句：只在「刚打进去、而且此刻没有别的句子在走」时执行。
+    /// 撤错东西比撤不了更糟，所以宁可保守。
+    fn undo(&mut self) {
+        if self.mode != Mode::Idle || self.recording {
+            self.publish(protocol::notice("正在识别这一句，稍后再撤销"));
+            return;
+        }
+        let Some(at) = self.last_output else {
+            self.publish(protocol::notice("没有可撤销的句子"));
+            return;
+        };
+        if at.elapsed() > UNDO_WINDOW {
+            self.last_output = None;
+            self.publish(protocol::notice("上一句过去太久了，不再撤销"));
+            return;
+        }
+        pf::undo();
+        self.last_output = None;
+        self.publish(protocol::notice("已撤销上一句"));
+        ui::hud(&self.app, "info", "已撤销", self.settings().channel);
+        ui::hud_hide(&self.app, 900);
+    }
+
     /// 手机点了某条候选
     fn commit(&mut self, channel: &str) {
         if self.mode != Mode::Pick {
             return;
         }
         let Ok(ch) = serde_json::from_value::<Channel>(serde_json::json!(channel)) else { return };
-        let Some(i) = self.rows.iter().position(|r| r.channel == ch) else { return };
+        let Some(i) = self.picker.index_of(ch) else { return };
         self.choose(i);
     }
 
     /// 选中一行上屏；还在监听的行等它定稿再说，失败的行提示重选
     fn choose(&mut self, i: usize) {
-        let Some(r) = self.rows.get(i) else { return };
-        if matches!(r.state, RowState::Listen | RowState::Wait) {
-            self.sel = i;
-            self.user_picked = true;
-            self.emit_rows();
-            return;
+        match self.picker.choose(i) {
+            Choice::Select => self.emit_rows(),
+            Choice::Shake => {
+                self.emit_rows();
+                self.publish(protocol::shake(i));
+            }
+            Choice::Commit => {
+                let Some((text, ch)) = self.picker.take(i) else { return };
+                crate::update_settings(&self.app, |s| {
+                    s.last_pick = Some(ch);
+                    *s.pick_counts.entry(ch).or_default() += 1;
+                });
+                self.cancel();
+                self.output(&text, ch);
+                self.record(&text, ch, None);
+                self.publish(protocol::fin(text));
+            }
         }
-        if r.state != RowState::Final {
-            self.sel = i;
-            self.user_picked = true;
-            self.emit_rows();
-            self.publish(serde_json::json!({ "type": "shake", "row": i }));
-            return;
-        }
-        let text = r.text.clone();
-        let ch = r.channel;
-        crate::update_settings(&self.app, |s| {
-            s.last_pick = Some(ch);
-            *s.pick_counts.entry(ch).or_default() += 1;
-        });
-        self.cancel();
-        self.output(&text, ch);
-        self.record(&text, ch, None);
-        self.publish(serde_json::json!({ "type": "final", "text": text }));
     }
 
     /// 最多每 33ms 推送一次，避免文字跳动
@@ -544,9 +498,9 @@ impl Ctl {
             Mode::Single(_) => self.segs.text(),
             _ => String::new(),
         };
-        let model = Model { recording: self.recording, rows: &self.rows, sel: self.sel, text };
+        let model = Model { recording: self.recording, rows: self.picker.rows(), sel: self.picker.sel(), text };
         if let Ok(v) = serde_json::to_value(&model) {
-            self.publish(serde_json::json!({ "type": "rows", "model": v }));
+            self.publish(protocol::rows(v));
         }
     }
 }

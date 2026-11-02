@@ -147,6 +147,8 @@ fn migrate(v: u32, raw: Value) -> Settings  // v1 → v2 → …
 | **D. 后端拆分** | 按 3.1 拆文件，行为不变 | `cargo test` 全绿且新增 `machine.rs` 单测；`main.rs` < 120 行 |
 | **E. 日志与错误** | 文件日志 + 去掉静默失败 | 拔网线/杀隧道能在日志里看到一行原因 |
 | **F. 协议枚举化** | WS 消息改成枚举 | 手改手机页字段名会立刻报错 |
+| — | **完成情况**：A/B/C/E 完成；D 只做到「判断逻辑可单测」（`session/machine.rs`），
+`main.rs`/`ui.rs`/`remote` 的纯结构搬家未做；F 完成（`protocol.rs` + 对账测试）。 | — |
 
 每阶段独立可回滚；A–C 只动前端，D–F 只动后端，互不阻塞。
 

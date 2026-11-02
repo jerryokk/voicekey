@@ -9,9 +9,11 @@
 //! 浏览器 --SRTP/UDP 直连----------------------------> Receiver --┘
 //! ```
 
+pub mod protocol;
 mod rtc;
 mod tunnel;
 
+pub use protocol::{Op, Out};
 pub use rtc::{Inbox, Receiver, Stats};
 pub use tunnel::Tunnel;
 
@@ -48,6 +50,8 @@ pub enum Event {
     Abort(String),
     /// 用户在候选里选了一条，参数是渠道 id
     Commit(String),
+    /// 撤销上一句已经打出去的文字
+    Undo,
     /// 手机端请求往已上屏的文字里退格，参数是删除的字符数
     Erase(u32),
 }
@@ -323,7 +327,7 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
         let _ = out_tx.send(value.to_string());
     };
 
-    say(json!({ "type": "hello", "ice": rtc::ICE }));
+    say(protocol::Out::Hello { ice: &rtc::ICE }.json());
 
     let mut receiver: Option<Receiver> = None;
     let inbox = hub.inbox.clone();
@@ -338,71 +342,73 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
                 }
             }
             Message::Text(text) => {
-                let Ok(msg) = serde_json::from_str::<Value>(&text) else { continue };
-                match msg.get("op").and_then(|o| o.as_str()).unwrap_or_default() {
-                    "offer" => {
-                        let sdp = msg.get("sdp").and_then(|s| s.as_str()).unwrap_or_default().to_string();
+                // 拼错字段名以前会静默走进 `_ => {}`，表现成「按了没反应」。
+                // 现在解析失败会留一行痕迹，契约由 protocol.rs 里的枚举兜住。
+                let Ok(op) = serde_json::from_str::<Op>(&text) else {
+                    eprintln!("无法解析的手机消息：{text}");
+                    continue;
+                };
+                match op {
+                    Op::Offer { sdp } => {
                         let r = match Receiver::new(inbox.clone()).await {
                             Ok(r) => r,
                             Err(e) => {
-                                say(json!({ "type": "error", "stage": "rtc", "message": e }));
+                                say(protocol::error("rtc", e));
                                 continue;
                             }
                         };
                         match r.accept(sdp).await {
                             Ok(answer) => {
-                                say(json!({ "type": "answer", "sdp": answer }));
+                                say(protocol::Out::Answer { sdp: answer }.json());
                                 receiver = Some(r);
                             }
-                            Err(e) => say(json!({ "type": "error", "stage": "answer", "message": e })),
+                            Err(e) => say(protocol::error("answer", e)),
                         }
                     }
-                    "start" => {
+                    Op::Start => {
                         if !hub.begin(conn).await {
-                            say(json!({ "type": "busy" }));
+                            say(protocol::Out::Busy.json());
                             continue;
                         }
                         if let Some(r) = &receiver {
                             r.reset();
                         }
-                        say(json!({ "type": "started" }));
+                        say(protocol::Out::Started.json());
                     }
-                    "stop" => {
+                    Op::Stop => {
                         if let Some(r) = &receiver {
                             let stats = r.snapshot();
-                            say(json!({
-                                "type": "stats",
-                                "packets": stats.packets,
-                                "seconds": stats.seconds(),
-                                "loss": stats.loss_percent(),
-                                "state": format!("{:?}", r.state()),
-                            }));
+                            say(protocol::Out::Stats {
+                                packets: stats.packets,
+                                seconds: stats.seconds(),
+                                loss: stats.loss_percent(),
+                                state: format!("{:?}", r.state()),
+                            }
+                            .json());
                             // Opus 是预测编码，丢包会污染解码器状态且很难从文字上看出来。
                             // 超过阈值就让页面下次改走回落通道——宁可多花带宽，不要悄悄变差。
-                            let loss = stats.loss_percent();
-                            if stats.packets > 0 && loss > 5.0 {
-                                say(json!({
-                                    "type": "prefer",
-                                    "transport": "pcm",
-                                    "reason": format!("丢包 {loss:.1}%"),
-                                }));
+                            if stats.packets > 0 && stats.loss_percent() > 5.0 {
+                                say(protocol::prefer(format!("丢包 {:.1}%", stats.loss_percent())));
                             }
                         }
                         hub.finish(conn, None).await;
                     }
                     // 候选由手机上的点击决定：只有持有本句的设备能提交
-                    "commit" => {
-                        let channel = msg.get("channel").and_then(|c| c.as_str()).unwrap_or_default().to_string();
+                    Op::Commit { channel } => {
                         if hub.holder() == Some(conn) || hub.holder().is_none() {
                             let _ = hub.events.send(Event::Commit(channel));
                         }
                     }
                     // 退格：删除已打到前台窗口里的字。上限拦住误触发的批量请求
-                    "backspace" => {
-                        let n = msg.get("n").and_then(|v| v.as_u64()).unwrap_or(1).clamp(1, 50) as u32;
-                        let _ = hub.events.send(Event::Erase(n));
+                    Op::Backspace { n } => {
+                        let _ = hub.events.send(Event::Erase(n.clamp(1, 50) as u32));
                     }
-                    _ => {}
+                    // 撤销上一句：和退格一样属于「已经上屏之后的修正」
+                    Op::Undo => {
+                        if hub.holder() == Some(conn) || hub.holder().is_none() {
+                            let _ = hub.events.send(Event::Undo);
+                        }
+                    }
                 }
             }
             Message::Close(_) => break,

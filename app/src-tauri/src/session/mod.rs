@@ -2,4 +2,5 @@
 //! controller 只保留「编排」本身。
 
 pub mod engines;
+pub mod machine;
 pub mod types;

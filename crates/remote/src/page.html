@@ -63,6 +63,7 @@
 <div id="app">
   <div id="bar"><span id="dot"></span><span id="state">未连接</span><span id="hint"></span></div>
   <div id="text"><span class="ph">按住下方按钮说话，电脑端会收到音频。</span></div>
+  <button id="undo" class="hide">↩ 撤销上一句</button>
   <div id="note" class="hide"></div>
   <div id="rows" class="hide"></div>
   <div id="ctl">
@@ -88,7 +89,15 @@ const RATE = 16000, FRAME = 320;
 const $ = (id) => document.getElementById(id);
 const textEl = $('text'), talkEl = $('talk'), stateEl = $('state'), dotEl = $('dot'), hintEl = $('hint'), rowsEl = $('rows');
 const noteEl = $('note');
-let noteTimer = 0;
+const undoEl = $('undo');
+let noteTimer = 0, undoTimer = 0;
+
+// 撤销窗口只开 6 秒：再久一点，前台窗口可能已经换了，Ctrl+Z 会撤到别的东西上
+function showUndo() {
+  undoEl.classList.remove('hide');
+  clearTimeout(undoTimer);
+  undoTimer = setTimeout(() => undoEl.classList.add('hide'), 6000);
+}
 
 // 电脑侧的原因要说给手机上的人听：他看不到桌面，只能靠这一行判断该怎么办
 function note(text) {
@@ -99,7 +108,7 @@ function note(text) {
 }
 
 let ws = null, ctx = null, node = null, stream = null, track = null;
-let kicked = false;
+let kicked = false, busyNotice = false;
 let pc = null, rtcReady = false, iceServers = [], preferPcm = false;
 let active = false, sent = 0, t0 = 0, timer = 0;
 let resPos = 0, inRate = RATE, pcm = [];
@@ -152,7 +161,12 @@ function connect() {
       hintEl.textContent = msg.packets
         ? `${msg.packets} 包 · ${msg.seconds.toFixed(1)} 秒 · 丢包 ${msg.loss.toFixed(1)}%`
         : '';
+    } else if (msg.type === 'started') {
+      // 服务端确认这一句归我：把上一次「被别的设备占着」的提示清掉
+      if (busyNotice) { busyNotice = false; textEl.textContent = ''; }
+      setState('录音中', true);
     } else if (msg.type === 'busy') {
+      busyNotice = true;
       textEl.textContent = '另一台设备正在说话，松手后重按';
     } else if (msg.type === 'prefer') {
       // 服务端判定这条链路丢包太多，后面的句子改走回落
@@ -163,6 +177,8 @@ function connect() {
       textEl.textContent = msg.text || '（没有识别到内容）';
       // 提交了某条候选或单渠道定稿：候选列表的使命结束
       rowsEl.classList.add('hide');
+      // 有字才给撤销入口，空结果没什么可撤的
+      if (msg.text) showUndo(); else undoEl.classList.add('hide');
     } else if (msg.type === 'rows') {
       renderRows(msg.model);
     } else if (msg.type === 'shake') {
@@ -316,6 +332,11 @@ $('enable').onclick = async () => {
     $('gate').querySelector('p').textContent = '麦克风打开失败：' + (e && e.message ? e.message : e);
   }
 };
+
+undoEl.addEventListener('click', () => {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ op: 'undo' }));
+  undoEl.classList.add('hide');
+});
 
 talkEl.addEventListener('pointerdown', (e) => { e.preventDefault(); begin(); });
 talkEl.addEventListener('pointerup', (e) => { e.preventDefault(); end(); });
