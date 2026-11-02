@@ -14,8 +14,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--paste-test") {
         let text = args.get(2).cloned().unwrap_or_else(|| "上屏测试".into());
-        voicekey_platform::paste(&text);
-        println!("已调用 paste：{text}");
+        let outcome = match voicekey_platform::paste(&text) {
+            voicekey_platform::Pasted::Sent => "已发送 Ctrl+V",
+            voicekey_platform::Pasted::Blocked => "前台窗口权限更高，正文已留在剪贴板",
+            voicekey_platform::Pasted::Typed => "剪贴板不可用，已逐字输入",
+        };
+        println!("上屏：{outcome}（{text}）");
+        println!("前台窗口权限是否拦住输入：{}", voicekey_platform::input_blocked());
         return Ok(());
     }
     if args.get(1).map(String::as_str) == Some("--backspace-test") {
