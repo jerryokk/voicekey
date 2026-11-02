@@ -259,7 +259,7 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>, s: &Settings) -> tauri::Result
         .menu(&tray_menu(app, s)?)
         // 左键直接弹二维码（配手机时的高频动作），右键才是菜单
         .show_menu_on_left_click(false)
-        .tooltip("VoiceKey")
+        .tooltip(format!("VoiceKey {} · {}", env!("CARGO_PKG_VERSION"), env!("VK_BUILD")))
         .on_menu_event(|app, ev| crate::tray_event(app, ev.id().as_ref()))
         .on_tray_icon_event(|tray, ev| {
             if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev {
