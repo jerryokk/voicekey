@@ -26,7 +26,7 @@ crates/
 tools/
   probe/             不用手机就能验证协议层的小工具，workspace 成员
 docs/phone-mic-plan.md  手机接入方案的设计与验收记录
-run.cmd              开发运行入口（补 cmake 路径、检查依赖）
+package.cmd          打包出 piik 式便携目录 dist\VoiceKey（exe + runtime\tunnel\cloudflared.exe）
 ```
 
 ## 常用命令
@@ -108,7 +108,7 @@ node tools/probe/pcm-test.mjs "ws://127.0.0.1:47800/ws?t=<token>" <某个 16k �
 
 ## 约定与易错点
 
-- **cmake 是构建前置**：`audiopus_sys` 要从源码编 libopus。本机 cmake 不在 PATH 时用 `pip install cmake`，真实二进制在 `Lib/site-packages/cmake/data/bin`（`Scripts/cmake.exe` 是个坏壳子）。CI 用 choco 装。
+- **cmake 是构建前置**：`audiopus_sys` 要从源码编 libopus。本机已把真实 cmake 写进**用户环境变量 `CMAKE`**（cargo 的 cmake 构建脚本原生认它；已验证：设了就能编，不设就挂在 pip 装的坏壳子 `Scripts\cmake.exe` 上）。CI 用 choco 装。**别把 cmake 加进 PATH**——坏壳子会抢先。
 - `cloudflared.exe` 放在 `app/src-tauri/binaries/`（不进 git，CI 下载）。运行时按四处查找：资源目录 → 程序目录的 `runtime/tunnel/` → **编译期记下的 `app/src-tauri/binaries/`** → PATH。所以 `cargo run` 或直接跑 `target/debug/voicekey.exe` 都不需要先拷文件。
 - 隧道启动参数不能省：`--protocol auto`（默认只走 QUIC，屏蔽 UDP 的网络起不来）、`metrics: 127.0.0.1:0`（否则第二个实例抢端口）、stdout 与 stderr 都要读（只读一个会把 cloudflared 卡死）。
 - 从 cloudflared 日志里抠域名时要求名称含连字符，否则会把 `api.trycloudflare.com` 当成隧道地址。
