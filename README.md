@@ -70,7 +70,7 @@ cargo run -p voicekey-core --bin vk-test -- doubao 你的录音.wav
 | `crates/remote` | 手机接入：本地服务、WS 信令、WebRTC 收流与解码、Cloudflare 隧道 |
 | `crates/platform` | 上屏（剪贴板 + Ctrl+V）与边说边上屏的 `Typer` |
 | `crates/wtlocal` | 微信离线：解析官方模型、纯 Rust 推理 |
-| `app/src-tauri` | 会话状态机、托盘、浮层、设置、更新 |
+| `app/src-tauri` | 会话状态机、托盘、浮层、设置 |
 | `app/src` | Svelte 界面 |
 | `tools/probe/` | 不用手机就能验证协议层的小工具，不参与正式构建 |
 

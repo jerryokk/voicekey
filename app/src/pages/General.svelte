@@ -1,16 +1,13 @@
 <script lang="ts">
   import { app, save } from "../lib/store.svelte";
-  import { call } from "../lib/api";
 
   const s = $derived(app.s!);
   const info = $derived(app.info!);
-  const u = $derived(app.update);
   const THEMES: [string, string][] = [["system", "跟随系统"], ["light", "浅色"], ["dark", "深色"]];
-
 </script>
 
 <h2>通用</h2>
-<div class="sub">启动、权限与更新。</div>
+<div class="sub">启动与外观。</div>
 <div class="group">
   <div class="row">
     <div class="lbl">开机自动启动</div>
@@ -26,14 +23,6 @@
 <h3>关于</h3>
 <div class="group">
   <div class="row">
-    <div class="lbl">VoiceKey {info.version}<small>{info.platform === "mac" ? "macOS" : "Windows"} · {info.arch}
-      {#if u.state === "available"} · 新版本 v{u.version} 可用{:else if u.state === "latest"} · 已是最新版本{:else if u.state === "error"} · 更新失败：{u.error}{/if}</small></div>
-    {#if u.state === "available"}
-      <button class="btn pri" onclick={() => call("update_install")}>更新并重启</button>
-    {:else if u.state === "downloading"}
-      <button class="btn" disabled>下载中 {u.progress ?? 0}%</button>
-    {:else}
-      <button class="btn" disabled={u.state === "checking"} onclick={() => call("update_check")}>{u.state === "checking" ? "检查中…" : "检查更新"}</button>
-    {/if}
+    <div class="lbl">VoiceKey {info.version}<small>Windows</small></div>
   </div>
 </div>

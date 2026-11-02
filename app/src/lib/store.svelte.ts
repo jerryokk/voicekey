@@ -1,10 +1,9 @@
-import { call, on, applyLook, type AppInfo, type Settings, type OfflineStatus, type Channel, type UpdateStatus, type Remote } from "./api";
+import { call, on, applyLook, type AppInfo, type Settings, type OfflineStatus, type Channel, type Remote } from "./api";
 
 export const app = $state({
   info: null as AppInfo | null,
   s: null as Settings | null,
   models: {} as Partial<Record<Channel, OfflineStatus>>,
-  update: { state: "idle" } as UpdateStatus,
   remote: { url: null, qr: null } as Remote,
   paused: false,
 });
@@ -35,7 +34,6 @@ export async function init() {
   app.info = info;
   app.s = info.settings;
   app.models = info.models;
-  app.update = info.update;
   app.remote = info.remote;
   app.paused = info.paused;
   const look = () => app.s && applyLook(info.platform, app.s.theme);
@@ -46,5 +44,4 @@ export async function init() {
     look();
   });
   on<{ ch: Channel; status: OfflineStatus }>("model", (v) => (app.models[v.ch] = v.status));
-  on<UpdateStatus>("update", (v) => (app.update = v));
 }

@@ -251,11 +251,6 @@ fn tray_menu<R: Runtime>(app: &AppHandle<R>, s: &Settings) -> tauri::Result<Menu
         Box::new(PredefinedMenuItem::separator(app)?),
         Box::new(MenuItem::with_id(app, "open", "打开 VoiceKey", true, None::<&str>)?),
     ];
-    if let Some(v) = crate::update::available() {
-        items.push(Box::new(MenuItem::with_id(app, "update", format!("更新到 v{v} 并重启"), true, None::<&str>)?));
-    } else if crate::update::downloading() {
-        items.push(Box::new(MenuItem::with_id(app, "update", "正在下载更新…", false, None::<&str>)?));
-    }
     items.push(Box::new(MenuItem::with_id(app, "quit", "退出 VoiceKey", true, None::<&str>)?));
 
     let refs: Vec<&dyn IsMenuItem<R>> = items.iter().map(|b| b.as_ref()).collect();

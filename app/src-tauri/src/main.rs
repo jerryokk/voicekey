@@ -5,7 +5,6 @@ mod controller;
 mod remote;
 mod settings;
 mod ui;
-mod update;
 mod wtoffline;
 
 use controller::Msg;
@@ -82,7 +81,6 @@ pub fn tray_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
         // 托盘第一项：直接弹扫码小窗，不用先开设置页
         "qr" => ui::show_qr(app),
         "open" => ui::show_settings(app),
-        "update" => update::install(app),
         "quit" => app.exit(0),
         _ => {
             if let Some(ch) = id.strip_prefix("ch:").and_then(|c| serde_json::from_value::<Channel>(json!(c)).ok()) {
@@ -118,7 +116,6 @@ fn get_state(app: AppHandle) -> serde_json::Value {
             "error": rs.error,
             "lanOnly": rs.lan_only,
         },
-        "update": update::status(),
     })
 }
 
@@ -140,16 +137,6 @@ fn set_paused(app: AppHandle, on: bool) {
     ui::refresh_tray(&app, &s);
 }
 
-#[tauri::command]
-fn update_check(app: AppHandle) {
-    update::check(&app, true);
-}
-
-#[tauri::command]
-fn update_install(app: AppHandle) {
-    update::install(&app);
-}
-
 fn main() {
     let settings = Settings::load();
     tauri::Builder::default()
@@ -158,9 +145,8 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
         ))
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
-            get_state, set_settings, model_download, set_paused, update_check, update_install
+            get_state, set_settings, model_download, set_paused
         ])
         .setup(move |app| {
             let (tx, rx) = mpsc::unbounded_channel();
@@ -191,7 +177,6 @@ fn main() {
             if !std::env::args().any(|a| a == "--minimized") {
                 ui::show_settings(&handle);
             }
-            update::schedule(&handle);
             Ok(())
         })
         .on_window_event(|w, e| {

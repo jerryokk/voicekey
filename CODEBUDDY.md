@@ -66,7 +66,7 @@ node tools/probe/pcm-test.mjs "ws://127.0.0.1:47800/ws?t=<token>" <某个 16k �
 | `crates/opus-sys` | libopus 预编译静态库 + 最小 FFI（7 个函数），编码（发云端）与解码（收手机音频）共用 |
 | `crates/platform` | 只做一件事：把文字打进当前前台窗口（剪贴板 + Ctrl+V），以及边说边上屏的 `Typer` |
 | `crates/wtlocal` | 微信离线：纯 Rust 加载官方 xnet 模型 |
-| `app/src-tauri` | 桌面壳：会话状态机、托盘、浮层、设置、更新 |
+| `app/src-tauri` | 桌面壳：会话状态机、托盘、浮层、设置 |
 | `app/src` | Svelte 界面：设置、浮层 |
 
 ### 音频链路
