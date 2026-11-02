@@ -17,6 +17,9 @@ pub fn get_state(app: AppHandle) -> serde_json::Value {
     let s = st.settings.read().unwrap().clone();
     let url = st.remote_url.read().unwrap().clone();
     let rs = st.remote_status.read().unwrap().clone();
+    // 二维码只对公网 https 地址生成。本机 127.0.0.1 的码手机扫了必然连不上，
+    // 给出来只会误导——托盘弹出的扫码窗口里尤其明显（用户以为能连，其实不能）。
+    let qr = url.as_deref().filter(|u| u.starts_with("https://")).and_then(qr_svg);
     json!({
         "settings": s,
         "platform": "win",
@@ -26,7 +29,7 @@ pub fn get_state(app: AppHandle) -> serde_json::Value {
         "last": st.last.read().unwrap().clone(),
         "remote": {
             "url": url,
-            "qr": url.as_deref().and_then(qr_svg),
+            "qr": qr,
             "state": rs.state,
             "error": rs.error,
             "lanOnly": rs.lan_only,

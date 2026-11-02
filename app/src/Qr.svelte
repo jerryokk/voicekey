@@ -27,7 +27,7 @@
   {:else if failed}
     <div class="fail">
       <b>公网隧道没有建立</b>
-      <p>检查网络后重启 VoiceKey；详情见设置里的「手机接入」。</p>
+      <p>{app.remote.error ?? "手机暂时无法连接。检查网络后重启 VoiceKey，或在「连接」页重新检测。"}</p>
     </div>
   {:else}
     <div class="pending"><span class="spin"></span>正在申请公网地址…</div>
@@ -51,7 +51,7 @@
   .spin { width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent); animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .retry { margin-top: 6px; border: 1px solid var(--line); background: #fff; border-radius: 8px; padding: 6px 14px; font-size: 12.5px; color: var(--fg2); cursor: pointer; }
-  .fail { margin-top: 40px; text-align: center; font-size: 12.5px; color: var(--fg2); line-height: 1.7; }
+  .fail { text-align: center; font-size: 12.5px; color: var(--fg2); line-height: 1.7; max-width: 250px; }
   .fail b { display: block; color: #a04424; font-size: 13px; margin-bottom: 6px; }
   .fail p { margin: 0; }
   :global(.dark) .qr { background: #fff; }
