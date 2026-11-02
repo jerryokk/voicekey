@@ -42,8 +42,7 @@ pub struct AppState {
 }
 
 fn apply<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
-    let st = app.state::<AppState>();
-    ui::refresh_tray(app, s, st.paused.load(Ordering::Relaxed));
+    ui::refresh_tray(app, s);
     let al = app.autolaunch();
     if al.is_enabled().unwrap_or(false) != s.autostart {
         let _ = if s.autostart { al.enable() } else { al.disable() };
@@ -80,16 +79,11 @@ pub fn model_ready(ch: Channel) -> bool {
 
 pub fn tray_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     match id {
-        "settings" => ui::show_settings(app),
+        // 托盘第一项：直接弹扫码小窗，不用先开设置页
+        "qr" => ui::show_qr(app),
+        "open" => ui::show_settings(app),
         "update" => update::install(app),
         "quit" => app.exit(0),
-        "pause" => {
-            let st = app.state::<AppState>();
-            let p = !st.paused.load(Ordering::Relaxed);
-            st.paused.store(p, Ordering::Relaxed);
-            let s = st.settings.read().unwrap().clone();
-            ui::refresh_tray(app, &s, p);
-        }
         _ => {
             if let Some(ch) = id.strip_prefix("ch:").and_then(|c| serde_json::from_value::<Channel>(json!(c)).ok()) {
                 update_settings(app, |s| s.channel = ch);
@@ -143,7 +137,7 @@ fn set_paused(app: AppHandle, on: bool) {
     let st = app.state::<AppState>();
     st.paused.store(on, Ordering::Relaxed);
     let s = st.settings.read().unwrap().clone();
-    ui::refresh_tray(&app, &s, on);
+    ui::refresh_tray(&app, &s);
 }
 
 #[tauri::command]

@@ -7,8 +7,8 @@ use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::image::Image;
-use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::TrayIconBuilder;
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, Monitor, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 const TRAY: &[u8] = include_bytes!("../icons/tray.png");
@@ -120,6 +120,27 @@ pub fn show_settings<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// 扫码小窗：托盘「显示二维码」用。独立于设置窗口，置顶、尺寸固定，扫完直接关
+pub fn show_qr<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(w) = app.get_webview_window("qr") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+        return;
+    }
+    let b = WebviewWindowBuilder::new(app, "qr", WebviewUrl::App("index.html".into()))
+        .initialization_script("window.__VK_VIEW = \"qr\";")
+        .title("扫码连接手机")
+        .inner_size(320.0, 344.0)
+        .resizable(false)
+        .maximizable(false)
+        .always_on_top(true)
+        .center();
+    if let Ok(w) = b.build() {
+        let _ = w.set_focus();
+    }
+}
+
 fn current_channel<R: Runtime>(app: &AppHandle<R>) -> Channel {
     app.state::<AppState>().settings.read().unwrap().channel
 }
@@ -162,45 +183,53 @@ pub fn hud_hide<R: Runtime>(app: &AppHandle<R>, delay_ms: u64) {
     });
 }
 
-fn tray_menu<R: Runtime>(app: &AppHandle<R>, s: &Settings, paused: bool) -> tauri::Result<Menu<R>> {
-    let head = if paused { "已暂停监听".to_string() } else { "在手机上按住说话".to_string() };
-    let mut items: Vec<Box<dyn IsMenuItem<R>>> = vec![
-        Box::new(MenuItem::with_id(app, "head", head, false, None::<&str>)?),
-        Box::new(PredefinedMenuItem::separator(app)?),
-    ];
+fn tray_menu<R: Runtime>(app: &AppHandle<R>, s: &Settings) -> tauri::Result<Menu<R>> {
+    let mut channels: Vec<Box<dyn IsMenuItem<R>>> = Vec::new();
     for c in Channel::available() {
         let id = format!("ch:{}", serde_json::to_value(c)?.as_str().unwrap_or(""));
-        items.push(Box::new(CheckMenuItem::with_id(app, id, c.title(), true, s.channel == c, None::<&str>)?));
+        channels.push(Box::new(CheckMenuItem::with_id(app, id, c.title(), true, s.channel == c, None::<&str>)?));
     }
-    items.push(Box::new(PredefinedMenuItem::separator(app)?));
-    items.push(Box::new(CheckMenuItem::with_id(app, "pause", "暂停监听", true, paused, None::<&str>)?));
+    let refs: Vec<&dyn IsMenuItem<R>> = channels.iter().map(|b| b.as_ref()).collect();
+    let sub = Submenu::with_items(app, "渠道", true, &refs)?;
+
+    let mut items: Vec<Box<dyn IsMenuItem<R>>> = vec![
+        Box::new(MenuItem::with_id(app, "qr", "显示二维码", true, None::<&str>)?),
+        Box::new(sub),
+        Box::new(PredefinedMenuItem::separator(app)?),
+        Box::new(MenuItem::with_id(app, "open", "打开 VoiceKey", true, None::<&str>)?),
+    ];
     if let Some(v) = crate::update::available() {
         items.push(Box::new(MenuItem::with_id(app, "update", format!("更新到 v{v} 并重启"), true, None::<&str>)?));
     } else if crate::update::downloading() {
         items.push(Box::new(MenuItem::with_id(app, "update", "正在下载更新…", false, None::<&str>)?));
     }
-    items.push(Box::new(MenuItem::with_id(app, "settings", "设置…", true, Some("CmdOrCtrl+,"))?));
-    items.push(Box::new(PredefinedMenuItem::separator(app)?));
-    items.push(Box::new(MenuItem::with_id(app, "quit", "退出 VoiceKey", true, Some("CmdOrCtrl+Q"))?));
+    items.push(Box::new(MenuItem::with_id(app, "quit", "退出 VoiceKey", true, None::<&str>)?));
+
     let refs: Vec<&dyn IsMenuItem<R>> = items.iter().map(|b| b.as_ref()).collect();
     Menu::with_items(app, &refs)
 }
 
-fn tray_icon<R: Runtime>(app: &AppHandle<R>, active: bool) -> Option<Image<'static>> {
-    if cfg!(target_os = "macos") {
-        Image::from_bytes(if active { TRAY_ACTIVE } else { TRAY }).ok()
-    } else {
-        app.default_window_icon().map(|i| i.clone().to_owned())
-    }
+fn tray_icon<R: Runtime>(_app: &AppHandle<R>, active: bool) -> Option<Image<'static>> {
+    // 托盘专用图（透明底、纯字形、笔画加粗），不能拿窗口图标代替：
+    // 窗口图标是带深色底的徽章，缩到托盘尺寸只剩一块黑方块
+    Image::from_bytes(if active { TRAY_ACTIVE } else { TRAY }).ok()
 }
 
 pub fn build_tray<R: Runtime>(app: &AppHandle<R>, s: &Settings) -> tauri::Result<()> {
     let mut b = TrayIconBuilder::with_id("main")
-        .menu(&tray_menu(app, s, false)?)
-        .show_menu_on_left_click(true)
-        .icon_as_template(true)
+        .menu(&tray_menu(app, s)?)
+        // 左键直接弹二维码（配手机时的高频动作），右键才是菜单
+        .show_menu_on_left_click(false)
         .tooltip("VoiceKey")
-        .on_menu_event(|app, ev| crate::tray_event(app, ev.id().as_ref()));
+        .on_menu_event(|app, ev| crate::tray_event(app, ev.id().as_ref()))
+        .on_tray_icon_event(|tray, ev| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev {
+                show_qr(tray.app_handle());
+            }
+        });
+    if cfg!(target_os = "macos") {
+        b = b.icon_as_template(true);
+    }
     if let Some(i) = tray_icon(app, false) {
         b = b.icon(i);
     }
@@ -208,8 +237,8 @@ pub fn build_tray<R: Runtime>(app: &AppHandle<R>, s: &Settings) -> tauri::Result
     Ok(())
 }
 
-pub fn refresh_tray<R: Runtime>(app: &AppHandle<R>, s: &Settings, paused: bool) {
-    if let (Some(t), Ok(m)) = (app.tray_by_id("main"), tray_menu(app, s, paused)) {
+pub fn refresh_tray<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
+    if let (Some(t), Ok(m)) = (app.tray_by_id("main"), tray_menu(app, s)) {
         let _ = t.set_menu(Some(m));
     }
 }

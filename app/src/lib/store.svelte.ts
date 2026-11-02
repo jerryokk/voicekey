@@ -27,6 +27,10 @@ export async function refreshRemote() {
 }
 
 export async function init() {
+  // 先挂监听再取状态：隧道可能在 get_state 返回前后就绪，晚挂会漏掉那次广播
+  on<{ state: string; error?: string }>("remote", (v) => {
+    if (v.state === "ready" || v.state === "failed") refreshRemote();
+  });
   const info = await call<AppInfo>("get_state");
   app.info = info;
   app.s = info.settings;
@@ -43,7 +47,4 @@ export async function init() {
   });
   on<{ ch: Channel; status: OfflineStatus }>("model", (v) => (app.models[v.ch] = v.status));
   on<UpdateStatus>("update", (v) => (app.update = v));
-  on<{ state: string; error?: string }>("remote", (v) => {
-    if (v.state === "ready" || v.state === "failed") refreshRemote();
-  });
 }

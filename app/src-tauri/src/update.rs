@@ -1,6 +1,6 @@
 //! 应用内更新：GitHub Release 上的 latest.json（tauri-plugin-updater，minisign 校验）
 use serde_json::{json, Value};
-use std::sync::{atomic::Ordering, LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_updater::UpdaterExt;
@@ -29,9 +29,8 @@ fn set<R: Runtime>(app: &AppHandle<R>, v: Value) {
     let changed = std::mem::replace(&mut *STATE.lock().unwrap(), v.clone())["state"] != v["state"];
     let _ = app.emit("update", &v);
     if changed {
-        let st = app.state::<crate::AppState>();
-        let s = st.settings.read().unwrap().clone();
-        crate::ui::refresh_tray(app, &s, st.paused.load(Ordering::Relaxed));
+        let s = app.state::<crate::AppState>().settings.read().unwrap().clone();
+        crate::ui::refresh_tray(app, &s);
     }
 }
 
