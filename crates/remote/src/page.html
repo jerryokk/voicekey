@@ -11,7 +11,7 @@
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body {
     margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none;
-    background: #f7f7f5; color: #222;
+    background: #f7f7f4; color: #1a1915;
     font: 15px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
     -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
     touch-action: none;
@@ -21,41 +21,41 @@
   #dot { width: 8px; height: 8px; border-radius: 50%; background: #c9c9c4; }
   #dot.on { background: #1d9e75; }
   #hint { margin-left: auto; }
-  #text { flex: 1; margin: 18px 0; padding: 16px; border-radius: 14px; background: #fff;
-          border: 1px solid #e6e6e1; overflow-y: auto; line-height: 1.7; white-space: pre-wrap;
+  #text { flex: 1; margin: 16px 0; padding: 16px; border-radius: 14px; background: #fff;
+          border: 1px solid rgba(24,22,16,.10); overflow-y: auto; line-height: 1.7; white-space: pre-wrap;
           -webkit-user-select: text; user-select: text; touch-action: pan-y; }
   #text .ph { color: #b6b6b0; }
   #rows { display: flex; flex-direction: column; gap: 8px; max-height: 30vh; overflow-y: auto;
           margin-bottom: 12px; touch-action: pan-y; }
   #rows.hide { display: none; }
   .row { display: flex; align-items: center; gap: 10px; padding: 11px 13px; background: #fff;
-         border: 1px solid #e6e6e1; border-radius: 12px; transition: border-color .12s ease, background .12s ease; }
+         border: 1px solid rgba(24,22,16,.10); border-radius: 12px; transition: border-color .12s ease, background .12s ease; }
   .row .name { font-size: 13px; font-weight: 600; color: #222; flex: none; }
   .row .txt { flex: 1; font-size: 13px; color: #6b6b66; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row .st { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #c9c9c4; }
-  .row.listen .st { background: #d85a30; animation: pulse 1s ease-in-out infinite; }
+  .row.listen .st { background: #d9552b; animation: pulse 1s ease-in-out infinite; }
   .row.final .st { background: #1d9e75; }
   .row.error .st { background: #b34040; }
-  .row.sel { border-color: #222; background: #fafaf8; }
+  .row.sel { border-color: #1a1915; background: #faf9f6; }
   .row.shake { animation: shake .4s ease; }
   @keyframes pulse { 50% { opacity: .35; } }
   @keyframes shake { 20%, 60% { transform: translateX(-5px); } 40%, 80% { transform: translateX(5px); } }
-  #talk { height: 22vh; min-height: 132px; border: none; border-radius: 20px; background: #222; color: #fff;
+  #talk { height: 22vh; min-height: 132px; border: none; border-radius: 18px; background: #1a1915; color: #fff;
           font-size: 19px; letter-spacing: 1px; display: flex; align-items: center; justify-content: center;
           flex-direction: column; gap: 6px; touch-action: none; }
-  #talk.rec { background: #d85a30; }
+  #talk.rec { background: #d9552b; }
   #talk small { font-size: 12px; opacity: .7; letter-spacing: 0; }
   #ctl { display: flex; gap: 12px; height: 22vh; min-height: 132px; }
   #talk { flex: 1; height: auto; min-height: 0; }
-  #del { width: 96px; flex: none; border-radius: 20px; border: 1px solid #e6e6e1; background: #fff; color: #55554f;
+  #del { width: 92px; flex: none; border-radius: 18px; border: 1px solid rgba(24,22,16,.12); background: #fff; color: #55554f;
          display: flex; align-items: center; justify-content: center; touch-action: none;
          transition: transform .06s ease, background .12s ease, opacity .12s ease; }
   #del:active { transform: scale(.96); background: #efefeb; }
   #del.off { opacity: .35; pointer-events: none; }
-  #gate { position: fixed; inset: 0; background: #f7f7f5; display: flex; align-items: center;
+  #gate { position: fixed; inset: 0; background: #f7f7f4; display: flex; align-items: center;
           justify-content: center; flex-direction: column; gap: 16px; padding: 32px; text-align: center; }
   #gate p { margin: 0; color: #6b6b66; font-size: 14px; line-height: 1.7; max-width: 300px; }
-  #gate button { border: none; background: #222; color: #fff; font-size: 17px; padding: 16px 40px; border-radius: 999px; }
+  #gate button { border: none; background: #1a1915; color: #fff; font-size: 17px; padding: 16px 40px; border-radius: 999px; }
   #gate.hide { display: none; }
 </style>
 </head>
@@ -88,6 +88,7 @@ const $ = (id) => document.getElementById(id);
 const textEl = $('text'), talkEl = $('talk'), stateEl = $('state'), dotEl = $('dot'), hintEl = $('hint'), rowsEl = $('rows');
 
 let ws = null, ctx = null, node = null, stream = null, track = null;
+let kicked = false;
 let pc = null, rtcReady = false, iceServers = [], preferPcm = false;
 let active = false, sent = 0, t0 = 0, timer = 0;
 let resPos = 0, inRate = RATE, pcm = [];
@@ -120,7 +121,12 @@ function connect() {
   ws = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => setState('已连接', true);
-  ws.onclose = () => { setState('连接断开，重试中', false); rtcReady = false; setTimeout(connect, 1200); };
+  ws.onclose = () => {
+    rtcReady = false;
+    if (kicked) { setState('电脑已断开，请重新扫码', false); return; }
+    setState('连接断开，重试中', false);
+    setTimeout(connect, 1200);
+  };
   ws.onerror = () => setState('连接出错', false);
   ws.onmessage = async (event) => {
     let msg; try { msg = JSON.parse(event.data); } catch { return; }
@@ -150,6 +156,12 @@ function connect() {
     } else if (msg.type === 'shake') {
       const el = rowsEl.children[msg.row];
       if (el) { el.classList.remove('shake'); void el.offsetWidth; el.classList.add('shake'); }
+    } else if (msg.type === 'kicked') {
+      kicked = true;
+      textEl.textContent = '电脑端已断开连接，请重新扫码。';
+      rowsEl.classList.add('hide');
+      setState('已断开', false);
+      ws.close();
     } else if (msg.type === 'error') {
       textEl.textContent = '出错（' + msg.stage + '）：' + msg.message;
       rowsEl.classList.add('hide');

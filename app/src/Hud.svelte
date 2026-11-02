@@ -41,7 +41,7 @@
     opacity: 0; transform: translateY(8px) scale(0.98); transition: opacity 0.16s, transform 0.16s;
   }
   .capsule.show { opacity: 1; transform: none; }
-  .rec { width: 9px; height: 9px; border-radius: 50%; background: #d85a30; flex: none; animation: pulse 1s ease-in-out infinite; }
+  .rec { width: 9px; height: 9px; border-radius: 50%; background: #d9552b; flex: none; animation: pulse 1s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: 0.35; } }
   .live { min-width: 0; max-width: 460px; white-space: nowrap; overflow: hidden; direction: rtl; text-align: left; font-size: 14px; }
   .live span { direction: ltr; unicode-bidi: plaintext; }

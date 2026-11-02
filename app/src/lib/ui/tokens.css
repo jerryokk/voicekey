@@ -1,0 +1,66 @@
+/* 设计令牌：颜色、圆角、间距、字号的唯一来源。
+   主色取自 logo 灯头的暖橙，只用于「当前 / 激活 / 录音」三种语义。 */
+:root {
+  /* 表面 */
+  --bg: #f7f7f4;
+  --bg-side: #f0f0ec;
+  --card: #ffffff;
+  --card-2: #faf9f6;
+  --line: rgba(24, 22, 16, 0.10);
+  --line-2: rgba(24, 22, 16, 0.18);
+
+  /* 文字 */
+  --fg: #1a1915;
+  --fg-2: #5f5e56;
+  --fg-3: #9b9a91;
+
+  /* 语义色 */
+  --accent: #d9552b;
+  --accent-2: #ffa06a;
+  --accent-soft: rgba(217, 85, 43, 0.10);
+  --ok: #1d9e75;
+  --warn: #b07d10;
+  --err: #c0392b;
+  --err-soft: rgba(192, 57, 43, 0.08);
+
+  /* 几何 */
+  --r-lg: 14px;
+  --r-md: 10px;
+  --r-sm: 8px;
+  --r-pill: 999px;
+
+  /* 字号 */
+  --fs-title: 20px;
+  --fs-body: 13px;
+  --fs-sub: 12px;
+  --fs-tag: 11px;
+
+  --font: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", "Consolas", monospace;
+
+  --shadow-pop: 0 12px 32px rgba(24, 22, 16, 0.16), 0 2px 6px rgba(24, 22, 16, 0.08);
+  color-scheme: light;
+}
+
+:root.dark {
+  --bg: #171714;
+  --bg-side: #1c1c18;
+  --card: #232320;
+  --card-2: #1e1e1b;
+  --line: rgba(255, 255, 255, 0.09);
+  --line-2: rgba(255, 255, 255, 0.16);
+
+  --fg: #ecebe4;
+  --fg-2: #a5a49b;
+  --fg-3: #6e6d66;
+
+  --accent: #e8734a;
+  --accent-soft: rgba(232, 115, 74, 0.14);
+  --ok: #3fb98a;
+  --warn: #d0a03a;
+  --err: #e2685a;
+  --err-soft: rgba(226, 104, 90, 0.12);
+
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3);
+  color-scheme: dark;
+}

@@ -10,7 +10,6 @@ mod wtoffline;
 use controller::Msg;
 use serde_json::json;
 use settings::{Channel, Settings};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime, WindowEvent};
 use tauri_plugin_autostart::ManagerExt;
@@ -32,8 +31,10 @@ pub struct AppState {
     pub settings: Arc<RwLock<Settings>>,
     pub tx: UnboundedSender<Msg>,
     pub qwen: Arc<QwenEngine>,
-    /// 托盘「暂停监听」：暂停后手机怎么按都不响应
-    pub paused: AtomicBool,
+    /// 最近一次成功上屏的结果（连接页展示）
+    pub last: Arc<RwLock<Option<serde_json::Value>>>,
+    /// 隧道 origin（不带 token），断开后可重新拼二维码
+    pub remote_origin: Arc<RwLock<Option<String>>>,
     /// 手机接入服务起来之后才有值
     pub remote: Arc<RwLock<Option<RemoteHandle>>>,
     pub remote_url: Arc<RwLock<Option<String>>>,
@@ -108,7 +109,7 @@ fn get_state(app: AppHandle) -> serde_json::Value {
         "version": app.package_info().version.to_string(),
         "channels": Channel::available(),
         "models": { "wetypeoffline": wtoffline::status() },
-        "paused": st.paused.load(Ordering::Relaxed),
+        "last": st.last.read().unwrap().clone(),
         "remote": {
             "url": url,
             "qr": url.as_deref().and_then(qr_svg),
@@ -129,12 +130,16 @@ fn model_download(app: AppHandle, ch: Channel) {
     download_model(&app, ch);
 }
 
+/// 断开手机：轮换 token，旧二维码立即失效；返回新的扫码地址
 #[tauri::command]
-fn set_paused(app: AppHandle, on: bool) {
+fn disconnect_phone(app: AppHandle) -> Option<String> {
     let st = app.state::<AppState>();
-    st.paused.store(on, Ordering::Relaxed);
-    let s = st.settings.read().unwrap().clone();
-    ui::refresh_tray(&app, &s);
+    let handle = st.remote.read().unwrap().clone()?;
+    handle.kick();
+    let origin = st.remote_origin.read().unwrap().clone()?;
+    let url = format!("{origin}/?t={}", handle.token());
+    *st.remote_url.write().unwrap() = Some(url.clone());
+    Some(url)
 }
 
 fn main() {
@@ -146,7 +151,7 @@ fn main() {
             Some(vec!["--minimized"]),
         ))
         .invoke_handler(tauri::generate_handler![
-            get_state, set_settings, model_download, set_paused
+            get_state, set_settings, model_download, disconnect_phone
         ])
         .setup(move |app| {
             let (tx, rx) = mpsc::unbounded_channel();
@@ -156,7 +161,8 @@ fn main() {
                 settings: Arc::new(RwLock::new(settings.clone())),
                 tx: tx.clone(),
                 qwen: qwen.clone(),
-                paused: AtomicBool::new(false),
+                last: Arc::new(RwLock::new(None)),
+                remote_origin: Arc::new(RwLock::new(None)),
                 remote: Arc::new(RwLock::new(None)),
                 remote_url: remote_url.clone(),
                 remote_status: Arc::new(RwLock::new(RemoteStatus {

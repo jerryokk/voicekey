@@ -8,11 +8,10 @@ use crate::ui;
 use crate::AppState;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use voicekey_core::{
     Audio, BaiduEngine, ChatterflyEngine, DoubaoEngine, Engine, IflyEngine, QwenEngine, SogouEngine, WeTypeEngine,
@@ -180,6 +179,22 @@ impl Ctl {
         }
     }
 
+    /// 记下这一句：连接页要展示「最近一句」，也让失败后能复查
+    fn record(&self, text: &str, ch: Channel, ms: Option<u64>) {
+        let value = serde_json::json!({
+            "text": text,
+            "channel": ch,
+            "at": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            "ms": ms,
+        });
+        let st = self.app.state::<AppState>();
+        *st.last.write().unwrap() = Some(value.clone());
+        let _ = self.app.emit("last", value);
+    }
+
     fn settings(&self) -> Settings {
         self.settings.read().unwrap().clone()
     }
@@ -207,10 +222,6 @@ impl Ctl {
     }
 
     fn remote_event(&mut self, e: RemoteEvent, audio: Option<Audio>) {
-        // 托盘里「暂停监听」时，手机怎么按都不响应
-        if self.app.state::<AppState>().paused.load(Ordering::Relaxed) {
-            return;
-        }
         match e {
             RemoteEvent::Press => self.press(audio),
             RemoteEvent::Release => self.release(),
@@ -439,6 +450,7 @@ impl Ctl {
                 } else {
                     ui::hud_hide(&self.app, 0);
                     pf::paste(&text);
+                    self.record(&text, ch, None);
                     self.publish(serde_json::json!({ "type": "final", "text": text }));
                 }
             }
@@ -574,6 +586,7 @@ impl Ctl {
         });
         self.cancel();
         pf::paste(&text);
+        self.record(&text, ch, None);
         self.publish(serde_json::json!({ "type": "final", "text": text }));
     }
 

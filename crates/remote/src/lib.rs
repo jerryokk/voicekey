@@ -63,7 +63,6 @@ pub struct Config {
 pub struct Service {
     hub: Arc<Hub>,
     events: mpsc::UnboundedReceiver<Event>,
-    token: String,
     origin: String,
     _tunnel: Option<Tunnel>,
 }
@@ -78,7 +77,7 @@ impl Service {
         let (events_tx, events) = mpsc::unbounded_channel();
         let (out, _) = broadcast::channel(64);
         let hub = Arc::new(Hub {
-            token: token.clone(),
+            token: std::sync::RwLock::new(token),
             events: events_tx,
             out,
             inbox: Arc::new(Inbox::default()),
@@ -110,12 +109,19 @@ impl Service {
             let _ = axum::serve(listener, router).await;
         });
 
-        Ok(Self { hub, events, token, origin, _tunnel: tunnel })
+        Ok(Self { hub, events, origin, _tunnel: tunnel })
     }
 
     /// 扫码用的完整地址
     pub fn url(&self) -> String {
-        format!("{}/?t={}", self.origin, self.token)
+        format!("{}/?t={}", self.origin, self.hub.token.read().unwrap().clone())
+    }
+
+    /// 断开所有手机：轮换 token（旧二维码立即失效）并通知在线页面退出。
+    /// 返回刷新后的扫码地址。
+    pub fn disconnect(&self) -> String {
+        self.hub.kick();
+        self.url()
     }
 
     /// 公网域名（隧道不可用时为本地地址），用于诊断展示
@@ -151,10 +157,22 @@ impl Handle {
     pub fn publish(&self, value: Value) {
         let _ = self.0.out.send(value.to_string());
     }
+
+    /// 轮换 token 并踢掉在线手机，桌面端用它实现「断开手机」
+    pub fn kick(&self) {
+        self.0.kick();
+    }
+
+    /// 当前 token（断开后重新拼二维码用）
+    pub fn token(&self) -> String {
+        self.0.token.read().unwrap().clone()
+    }
 }
 
 struct Hub {
-    token: String,    events: mpsc::UnboundedSender<Event>,
+    /// 可变：断开手机时轮换，旧二维码立刻失效
+    token: std::sync::RwLock<String>,
+    events: mpsc::UnboundedSender<Event>,
     out: broadcast::Sender<String>,
     inbox: Arc<Inbox>,
     hold: AsyncMutex<Option<Hold>>,
@@ -168,6 +186,12 @@ struct Hold {
 }
 
 impl Hub {
+    /// 轮换 token 并让在线页面断开
+    fn kick(&self) {
+        *self.token.write().unwrap() = new_token();
+        let _ = self.out.send(json!({ "type": "kicked" }).to_string());
+    }
+
     fn holder(&self) -> Option<u64> {
         self.hold.try_lock().ok().and_then(|g| g.as_ref().map(|h| h.conn))
     }
@@ -237,7 +261,8 @@ struct WsQuery {
 }
 
 async fn ws(upgrade: WebSocketUpgrade, Query(q): Query<WsQuery>, State(hub): State<Arc<Hub>>) -> Response {
-    if q.t.as_deref() != Some(hub.token.as_str()) {
+    let expected = hub.token.read().unwrap().clone();
+    if q.t.as_deref() != Some(expected.as_str()) {
         return (StatusCode::FORBIDDEN, "token 不正确").into_response();
     }
     upgrade.on_upgrade(move |socket| handle(socket, hub))

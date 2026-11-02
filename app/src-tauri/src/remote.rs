@@ -46,6 +46,7 @@ pub fn spawn(app: AppHandle) {
             let st = app.state::<AppState>();
             *st.remote.write().unwrap() = Some(service.handle());
             *st.remote_url.write().unwrap() = Some(url);
+            *st.remote_origin.write().unwrap() = Some(service.origin().to_string());
         }
         set_status(&app, RemoteStatus { state: "ready", error: None, lan_only });
 

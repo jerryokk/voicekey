@@ -38,12 +38,12 @@
 
 <style>
   .bar { height: 34px; display: flex; align-items: center; justify-content: space-between; padding: 0 6px 0 14px;
-         font-size: 12.5px; color: var(--fg2); background: #f1f1ee; border-bottom: 1px solid var(--line); }
+         font-size: 12.5px; color: var(--fg2); background: var(--bg-side); border-bottom: 1px solid var(--line); }
   .bar .x { width: 30px; height: 24px; display: grid; place-items: center; border: 0; border-radius: 6px;
             background: none; color: var(--fg2); cursor: default; }
   .bar .x:hover { background: #e81123; color: #fff; }
   .bar svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; }
-  .wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 16px 16px; height: calc(100vh - 34px); background: #f7f7f5; }
+  .wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 16px 16px; height: calc(100vh - 34px); background: var(--bg); }
   .qr { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 12px; }
   .qr :global(svg) { width: 240px; height: 240px; display: block; }
   .hint { margin: 0; font-size: 12.5px; color: var(--fg2); text-align: center; line-height: 1.6; }
@@ -54,6 +54,5 @@
   .fail { margin-top: 40px; text-align: center; font-size: 12.5px; color: var(--fg2); line-height: 1.7; }
   .fail b { display: block; color: #a04424; font-size: 13px; margin-bottom: 6px; }
   .fail p { margin: 0; }
-  :global(.dark) .wrap { background: #1b1b19; }
   :global(.dark) .qr { background: #fff; }
 </style>
