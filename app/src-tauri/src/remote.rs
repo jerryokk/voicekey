@@ -29,7 +29,7 @@ pub fn spawn(app: AppHandle) {
         let mut service = match Service::start(config).await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("手机接入启动失败：{e}");
+                crate::log_error!("手机接入启动失败：{e}");
                 set_status(&app, RemoteStatus { state: "failed", error: Some(e), lan_only: false });
                 return;
             }
@@ -37,10 +37,10 @@ pub fn spawn(app: AppHandle) {
 
         let url = service.url();
         // 只打域名，不打带 token 的完整地址：控制台截图、日志上报都会把它带出去
-        eprintln!("手机接入已就绪：{}", service.origin());
+        crate::log_info!("手机接入已就绪：{}", service.origin());
         let lan_only = service.origin().starts_with("http://127.0.0.1");
         if lan_only {
-            eprintln!("隧道不可用：手机与电脑不在同一局域网时将无法连接");
+            crate::log_warn!("隧道不可用，仅本机地址");
         }
         {
             let st = app.state::<AppState>();

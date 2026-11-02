@@ -2,6 +2,8 @@
 #![windows_subsystem = "windows"]
 
 mod controller;
+mod log;
+mod session;
 mod remote;
 mod settings;
 mod ui;
@@ -143,6 +145,7 @@ fn disconnect_phone(app: AppHandle) -> Option<String> {
 }
 
 fn main() {
+    log::init();
     let settings = Settings::load();
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| ui::show_settings(app)))

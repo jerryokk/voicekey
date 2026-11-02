@@ -3,19 +3,17 @@
 //! 状态机本身没变（Mode / gen / Segments / 超时 / 33ms 节流都是原来那套），
 //! 变的只是「谁开始一句话」：以前是全局快捷键加电脑麦克风，现在是手机端的 Press/Release，
 //! 音频由 `voicekey-remote` 交过来。用户松手就是结束，所以静音自动结束那套判定没有了。
+use crate::session::types::{Mode, Model, Row, RowState, Segments};
 use crate::settings::{Channel, Settings};
 use crate::ui;
 use crate::AppState;
-use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use voicekey_core::{
-    Audio, BaiduEngine, ChatterflyEngine, DoubaoEngine, Engine, IflyEngine, QwenEngine, SogouEngine, WeTypeEngine,
-};
+use voicekey_core::{Audio, Engine, QwenEngine};
 use voicekey_platform::{self as pf, Typer};
 use voicekey_remote::{Event as RemoteEvent, Handle as RemoteHandle};
 
@@ -26,92 +24,6 @@ pub enum Msg {
     Done { gen: u64, ch: Channel, seg: usize, res: Result<String, String> },
     Timeout { token: u64 },
     Flush,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Debug)]
-#[serde(rename_all = "lowercase")]
-pub enum RowState {
-    Listen,
-    Wait,
-    Final,
-    Error,
-    Skip,
-}
-
-#[derive(Clone, Serialize)]
-pub struct Row {
-    channel: Channel,
-    text: String,
-    state: RowState,
-    ms: Option<u64>,
-}
-
-#[derive(Clone, Serialize)]
-struct Model<'a> {
-    recording: bool,
-    rows: &'a [Row],
-    sel: usize,
-    /// 单渠道模式下这一句的实时文字（多渠道走 rows）
-    text: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Mode {
-    Idle,
-    Single(Channel),
-    Pick,
-}
-
-/// 单渠道会话的分段：识别中再触发继续说，各段结果按顺序拼成一句
-#[derive(Default)]
-struct Segments {
-    parts: Vec<(String, bool)>,
-    error: Option<String>,
-}
-
-impl Segments {
-    fn start(&mut self) -> usize {
-        self.parts.push((String::new(), false));
-        self.parts.len() - 1
-    }
-
-    /// None：该段已定稿，丢弃；Some(changed)：文字是否有变化
-    fn partial(&mut self, i: usize, text: String) -> Option<bool> {
-        match self.parts.get_mut(i) {
-            Some((t, false)) => {
-                let changed = *t != text;
-                *t = text;
-                Some(changed)
-            }
-            _ => None,
-        }
-    }
-
-    /// keep_partial：流式上屏时，定稿为空也保留已打出的片段。失败一律留下已显示的中间结果
-    fn done(&mut self, i: usize, res: Result<String, String>, keep_partial: bool) {
-        let Some((t, done)) = self.parts.get_mut(i) else { return };
-        if *done {
-            return;
-        }
-        *done = true;
-        match res {
-            Ok(s) if !s.is_empty() => *t = s,
-            Ok(_) => {
-                if !keep_partial {
-                    t.clear()
-                }
-            }
-            Err(e) => self.error = Some(e),
-        }
-    }
-
-    fn finished(&self) -> bool {
-        self.parts.iter().all(|p| p.1)
-    }
-
-    fn text(&self) -> String {
-        self.parts.iter().map(|p| p.0.as_str()).collect()
-    }
 }
 
 pub struct Ctl {
@@ -139,15 +51,7 @@ pub struct Ctl {
 
 pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) {
     let st = app.state::<AppState>();
-    let mut engines: HashMap<Channel, Arc<dyn Engine>> = HashMap::new();
-    engines.insert(Channel::Doubao, Arc::new(DoubaoEngine));
-    engines.insert(Channel::Wetype, Arc::new(WeTypeEngine::default()));
-    engines.insert(Channel::Qwen, qwen);
-    engines.insert(Channel::Baidu, Arc::new(BaiduEngine));
-    engines.insert(Channel::Sogou, Arc::new(SogouEngine));
-    engines.insert(Channel::Iflytek, Arc::new(IflyEngine));
-    engines.insert(Channel::Chatterfly, Arc::new(ChatterflyEngine));
-    engines.insert(Channel::WetypeOffline, crate::wtoffline::engine());
+    let engines = crate::session::engines::registry(qwen);
     let ctl = Ctl {
         settings: st.settings.clone(),
         remote: st.remote.clone(),
@@ -616,47 +520,3 @@ impl Ctl {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Segments;
-
-    #[test]
-    fn resumed_segments_join_in_order_and_wait_for_all() {
-        let mut s = Segments::default();
-        let a = s.start();
-        assert_eq!(s.partial(a, "今天".into()), Some(true));
-        let b = s.start();
-        assert_eq!(s.partial(b, "天气".into()), Some(true));
-        assert_eq!(s.partial(b, "天气".into()), Some(false));
-        s.done(b, Ok("天气不错。".into()), false);
-        assert!(!s.finished());
-        s.done(a, Ok("今天，".into()), false);
-        assert!(s.finished());
-        assert_eq!(s.text(), "今天，天气不错。");
-        assert_eq!(s.partial(a, "迟到".into()), None);
-    }
-
-    #[test]
-    fn failed_segment_keeps_partial_text_and_reports_error() {
-        let mut s = Segments::default();
-        let a = s.start();
-        let b = s.start();
-        s.partial(b, "半句".into());
-        s.done(a, Ok("第一句".into()), false);
-        s.done(b, Err("网络".into()), false);
-        assert_eq!(s.text(), "第一句半句");
-        assert_eq!(s.error.as_deref(), Some("网络"));
-
-        let mut timed_out = Segments::default();
-        let d = timed_out.start();
-        timed_out.partial(d, "已经打出来的字".into());
-        timed_out.done(d, Err("识别超时".into()), false);
-        assert_eq!(timed_out.text(), "已经打出来的字");
-
-        let mut streamed = Segments::default();
-        let c = streamed.start();
-        streamed.partial(c, "已上屏".into());
-        streamed.done(c, Ok(String::new()), true);
-        assert_eq!(streamed.text(), "已上屏");
-    }
-}
