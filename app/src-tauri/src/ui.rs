@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, Monitor, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 const TRAY: &[u8] = include_bytes!("../icons/tray.png");
@@ -257,15 +257,10 @@ fn tray_icon<R: Runtime>(_app: &AppHandle<R>, active: bool) -> Option<Image<'sta
 pub fn build_tray<R: Runtime>(app: &AppHandle<R>, s: &Settings) -> tauri::Result<()> {
     let mut b = TrayIconBuilder::with_id("main")
         .menu(&tray_menu(app, s)?)
-        // 左键直接弹二维码（配手机时的高频动作），右键才是菜单
-        .show_menu_on_left_click(false)
+        // 点击托盘即出菜单（左键右键都一样），菜单第一项才是「显示二维码」
+        .show_menu_on_left_click(true)
         .tooltip(format!("VoiceKey {} · {}", env!("CARGO_PKG_VERSION"), env!("VK_BUILD")))
-        .on_menu_event(|app, ev| crate::tray_event(app, ev.id().as_ref()))
-        .on_tray_icon_event(|tray, ev| {
-            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev {
-                show_qr(tray.app_handle());
-            }
-        });
+        .on_menu_event(|app, ev| crate::tray_event(app, ev.id().as_ref()));
     if cfg!(target_os = "macos") {
         b = b.icon_as_template(true);
     }
