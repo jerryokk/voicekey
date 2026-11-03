@@ -102,3 +102,23 @@ macro_rules! log_warn {
 macro_rules! log_error {
     ($($arg:tt)*) => { $crate::log::write("error", &format!($($arg)*)) };
 }
+
+#[cfg(test)]
+mod tests {
+    use super::date_stamp;
+
+    /// 日期换算是手写的 Howard Hinnant civil_from_days。写错不只是文件名难看：
+    /// 按名字排序裁剪旧文件时会误删当天的日志，所以拿已知时间点钉住。
+    #[test]
+    fn date_stamp_matches_known_utc_dates() {
+        for (secs, want) in [
+            (0, "19700101"),
+            (1_700_000_000, "20231114"),
+            (1_709_164_800, "20240229"), // 闰日
+            (1_735_689_600, "20250101"), // 跨年
+            (4_102_444_800, "21000101"), // 2100 不是闰年
+        ] {
+            assert_eq!(date_stamp(secs), want, "secs = {secs}");
+        }
+    }
+}

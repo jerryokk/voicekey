@@ -17,9 +17,7 @@ pub fn get_state(app: AppHandle) -> serde_json::Value {
     let s = st.settings.read().unwrap().clone();
     let url = st.remote_url.read().unwrap().clone();
     let rs = st.remote_status.read().unwrap().clone();
-    // 二维码只对公网 https 地址生成。本机 127.0.0.1 的码手机扫了必然连不上，
-    // 给出来只会误导——托盘弹出的扫码窗口里尤其明显（用户以为能连，其实不能）。
-    let qr = url.as_deref().filter(|u| u.starts_with("https://")).and_then(qr_svg);
+    let qr = scannable(url.as_deref()).and_then(qr_svg);
     json!({
         "settings": s,
         "platform": "win",
@@ -80,8 +78,32 @@ pub fn disconnect_phone(app: AppHandle) -> Option<String> {
     Some(url)
 }
 
+/// 手机能扫的地址：只有公网 https 才算。
+///
+/// 这条策略以前散在两个界面里各判一次，结果托盘弹出的扫码窗照常画出一张
+/// `http://127.0.0.1` 的码——扫了连不上。现在收成一处，二维码的存在本身就等于可用。
+/// 抽成函数是为了能单测：它是个纯判断，没有理由混在命令里。
+fn scannable(url: Option<&str>) -> Option<&str> {
+    url.filter(|u| u.starts_with("https://"))
+}
+
 /// 二维码用 SVG 直接给前端：省掉一个前端依赖，也不怕离线加载不到库
 fn qr_svg(url: &str) -> Option<String> {
     let code = qrcode::QrCode::new(url.as_bytes()).ok()?;
     Some(code.render::<qrcode::render::svg::Color>().min_dimensions(240, 240).quiet_zone(true).build())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scannable;
+
+    #[test]
+    fn only_public_https_addresses_are_scannable() {
+        assert_eq!(scannable(Some("https://a-b-c.trycloudflare.com/?t=1")), Some("https://a-b-c.trycloudflare.com/?t=1"));
+        // 隧道没起来时的本机地址：手机连不上，不能给二维码
+        assert_eq!(scannable(Some("http://127.0.0.1:47800/?t=1")), None);
+        // 明文公网地址拿不到麦克风权限（浏览器只在安全上下文给），同样不可用
+        assert_eq!(scannable(Some("http://voice.example.com/?t=1")), None);
+        assert_eq!(scannable(None), None);
+    }
 }
