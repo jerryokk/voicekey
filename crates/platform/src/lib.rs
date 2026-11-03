@@ -36,4 +36,15 @@ impl Typer {
     pub fn finish(&mut self) {
         self.done = true;
     }
+
+    /// 放弃这一句：把已经打出去的字退回来。
+    /// 用户上滑取消时，输入框里不该留下半句。
+    pub fn discard(&mut self) {
+        if self.done {
+            return;
+        }
+        imp::backspace(self.typed.len());
+        self.typed.clear();
+        self.done = true;
+    }
 }

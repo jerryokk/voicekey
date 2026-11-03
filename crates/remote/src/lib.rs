@@ -46,6 +46,8 @@ pub enum Event {
     Press,
     /// 松手，进入定稿
     Release,
+    /// 上滑取消：这一句不要了，丢弃音频且不产出文字
+    Cancel,
     /// 断线或出错：保留已识别的文字
     Abort(String),
     /// 用户在候选里选了一条，参数是渠道 id
@@ -236,6 +238,27 @@ impl Hub {
 
     /// 结束一句话。只有持有者能结束，返回是否真的结束了。
     async fn finish(&self, conn: u64, error: Option<String>) -> bool {
+        if !self.stop(conn).await {
+            return false;
+        }
+        let _ = self.events.send(match error {
+            Some(reason) => Event::Abort(reason),
+            None => Event::Release,
+        });
+        true
+    }
+
+    /// 取消这一句：停泵、丢弃音频，不发 Release，所以下游不会去跑识别。
+    async fn cancel(&self, conn: u64) -> bool {
+        if !self.stop(conn).await {
+            return false;
+        }
+        let _ = self.events.send(Event::Cancel);
+        true
+    }
+
+    /// 停掉持有者的泵并把 hold 交还。返回调用者是否确实是持有者。
+    async fn stop(&self, conn: u64) -> bool {
         let mut hold = self.hold.lock().await;
         let Some(current) = hold.as_ref() else { return false };
         if current.conn != conn {
@@ -246,10 +269,6 @@ impl Hub {
         current.stop.store(true, Ordering::Relaxed);
         // 泵退出时丢弃发送端，引擎随即收到流结束
         let _ = current.pump.await;
-        let _ = self.events.send(match error {
-            Some(reason) => Event::Abort(reason),
-            None => Event::Release,
-        });
         true
     }
 }
@@ -385,6 +404,10 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
                             }
                         }
                         hub.finish(conn, None).await;
+                    }
+                    // 上滑取消：只有持有本句的设备能取消
+                    Op::Cancel => {
+                        hub.cancel(conn).await;
                     }
                     // 候选由手机上的点击决定：只有持有本句的设备能提交
                     Op::Commit { channel } => {

@@ -120,7 +120,7 @@ impl Ctl {
             Msg::Partial { gen, ch, seg, text } if self.tickets.accepts(gen) => self.partial(ch, seg, text),
             Msg::Done { gen, ch, seg, res } if self.tickets.accepts(gen) => self.done(ch, seg, res),
             Msg::Timeout { token } if self.tickets.timeout_is_current(token) && self.mode != Mode::Idle => {
-                self.abort(Some("识别超时".into()))
+                self.abort("识别超时".into())
             }
             Msg::Flush => {
                 self.flush_pending = false;
@@ -134,9 +134,10 @@ impl Ctl {
         match e {
             RemoteEvent::Press => self.press(audio),
             RemoteEvent::Release => self.release(),
+            RemoteEvent::Cancel => self.cancel_current(),
             RemoteEvent::Abort(reason) => {
                 if self.mode != Mode::Idle {
-                    self.abort(Some(reason))
+                    self.abort(reason)
                 }
             }
             RemoteEvent::Commit(channel) => self.commit(&channel),
@@ -342,8 +343,8 @@ impl Ctl {
         });
     }
 
-    /// 打断：定稿超时、手机断线
-    fn abort(&mut self, message: Option<String>) {
+    /// 打断：定稿超时、手机断线。已经识别出的文字尽量留下
+    fn abort(&mut self, message: String) {
         if self.mode == Mode::Idle {
             return;
         }
@@ -355,30 +356,39 @@ impl Ctl {
             }
             Mode::Idle => (String::new(), self.settings().channel),
         };
-        self.cancel();
-        // 超时打断时，非流式还没写进输入框的中间结果补上；用户主动取消不补写
-        if message.is_some() && !streamed && !partial.is_empty() {
+        self.cancel(false);
+        // 非流式时中间结果还没写进输入框，补上；流式已经打出去了，不重复写
+        if !streamed && !partial.is_empty() {
             self.output(&partial, ch);
         }
-        match message {
-            Some(m) => {
-                let text = if partial.is_empty() { m } else { format!("{m}，已保留已识别的文字") };
-                self.publish(protocol::error("session", text.as_str()));
-                ui::hud_error(&self.app, &text);
-            }
-            None => ui::hud_hide(&self.app, 0),
-        }
+        let text = if partial.is_empty() { message } else { format!("{message}，已保留已识别的文字") };
+        self.publish(protocol::error("session", text.as_str()));
+        ui::hud_error(&self.app, &text);
     }
 
-    fn cancel(&mut self) {
+    fn cancel(&mut self, revert: bool) {
         self.tickets.next_generation();
         self.tickets.next_timeout();
         self.engines.abort_all();
         self.recording = false;
         if let Some(mut t) = self.typer.take() {
-            t.finish();
+            // 用户取消时把已经流式打出去的字退回来，输入框里不留半句
+            if revert {
+                t.discard();
+            } else {
+                t.finish();
+            }
         }
         self.mode = Mode::Idle;
+    }
+
+    /// 手机上滑取消：这一句不要了，什么都不上屏
+    fn cancel_current(&mut self) {
+        if self.mode == Mode::Idle && !self.recording {
+            return;
+        }
+        self.cancel(true);
+        ui::hud_hide(&self.app, 0);
     }
 
     /// 撤销上一句：只在「刚打进去、而且此刻没有别的句子在走」时执行。
@@ -428,7 +438,7 @@ impl Ctl {
                     s.last_pick = Some(ch);
                     *s.pick_counts.entry(ch).or_default() += 1;
                 });
-                self.cancel();
+                self.cancel(false);
                 self.output(&text, ch);
                 self.record(&text, ch, None);
                 self.publish(protocol::fin(text));
