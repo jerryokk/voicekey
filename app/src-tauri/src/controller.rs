@@ -18,9 +18,6 @@ use voicekey_platform::{self as pf, Typer};
 use voicekey_remote::protocol;
 use voicekey_remote::{Event as RemoteEvent, Handle as RemoteHandle};
 
-/// 撤销时间窗：与手机页那个按钮的存活时间一致
-const UNDO_WINDOW: Duration = Duration::from_secs(8);
-
 pub struct Ctl {
     app: AppHandle,
     settings: Arc<RwLock<Settings>>,
@@ -41,8 +38,6 @@ pub struct Ctl {
     last_emit: Instant,
     flush_pending: bool,
     released_at: Option<Instant>,
-    /// 上一次把文字打进前台窗口的时刻。撤销要卡时间窗，否则会撤到别的东西上
-    last_output: Option<Instant>,
 }
 
 pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) {
@@ -62,7 +57,6 @@ pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) 
         last_emit: Instant::now(),
         flush_pending: false,
         released_at: None,
-        last_output: None,
     };
     tauri::async_runtime::spawn(ctl.run(rx));
 }
@@ -78,7 +72,6 @@ impl Ctl {
     /// 被拦下的文字留在剪贴板里，用户按一次 Ctrl+V 就能拿到，不算白说。
     fn output(&mut self, text: &str, ch: Channel) {
         if pf::paste(text) != pf::Pasted::Blocked {
-            self.last_output = Some(Instant::now());
             ui::hud_hide(&self.app, 0);
             return;
         }
@@ -141,7 +134,6 @@ impl Ctl {
                 }
             }
             RemoteEvent::Commit(channel) => self.commit(&channel),
-            RemoteEvent::Undo => self.undo(),
             // 说到一半不给删：流式打字机记着已打的字数，外部退格会让它失准
             RemoteEvent::Erase(n) if !self.recording => pf::backspace(n as usize),
             RemoteEvent::Erase(_) => {}
@@ -389,29 +381,6 @@ impl Ctl {
         }
         self.cancel(true);
         ui::hud_hide(&self.app, 0);
-    }
-
-    /// 撤销上一句：只在「刚打进去、而且此刻没有别的句子在走」时执行。
-    /// 撤错东西比撤不了更糟，所以宁可保守。
-    fn undo(&mut self) {
-        if self.mode != Mode::Idle || self.recording {
-            self.publish(protocol::notice("正在识别这一句，稍后再撤销"));
-            return;
-        }
-        let Some(at) = self.last_output else {
-            self.publish(protocol::notice("没有可撤销的句子"));
-            return;
-        };
-        if at.elapsed() > UNDO_WINDOW {
-            self.last_output = None;
-            self.publish(protocol::notice("上一句过去太久了，不再撤销"));
-            return;
-        }
-        pf::undo();
-        self.last_output = None;
-        self.publish(protocol::notice("已撤销上一句"));
-        ui::hud(&self.app, "info", "已撤销", self.settings().channel);
-        ui::hud_hide(&self.app, 900);
     }
 
     /// 手机点了某条候选

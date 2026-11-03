@@ -59,15 +59,6 @@
   }
   #text.ph { color: var(--faint); }
 
-  #foot { display: flex; justify-content: flex-end; align-items: center; min-height: 32px; padding-top: 6px; }
-  #undo {
-    display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px 6px 10px;
-    border-radius: 999px; border: 1px solid var(--line); background: #faf9f6; color: #55554f;
-    font-size: 12.5px; transition: transform .08s ease, background .15s ease;
-  }
-  #undo:active { transform: scale(.96); background: #f0efea; }
-  #undo svg { width: 13px; height: 13px; }
-
   /* 提示条：取消结果、切换通道、没听清这类一句话说明都走这里 */
   #note {
     padding: 10px 13px; border-radius: 12px; font-size: 13px; line-height: 1.6;
@@ -195,13 +186,6 @@
 
   <div id="card">
     <div id="text" class="ph">按住下方按钮说话，电脑端会收到音频。</div>
-    <div id="foot">
-      <button id="undo" class="hide" aria-label="撤回上一句">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-             stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h11a5 5 0 0 1 0 10H8"/><path d="M7 4L3 8l4 4"/></svg>
-        撤回
-      </button>
-    </div>
   </div>
 
   <div id="note" class="hide"></div>
@@ -248,10 +232,10 @@ const token = new URLSearchParams(location.search).get('t') || '';
 const RATE = 16000, FRAME = 320;
 const $ = (id) => document.getElementById(id);
 const textEl = $('text'), talkEl = $('talk'), stateEl = $('state'), dotEl = $('dot'), hintEl = $('hint'), rowsEl = $('rows');
-const cardEl = $('card'), noteEl = $('note'), undoEl = $('undo'), tipEl = $('tip'), tipTextEl = $('tiptext');
+const cardEl = $('card'), noteEl = $('note'), tipEl = $('tip'), tipTextEl = $('tiptext');
 const labelEl = $('tlabel'), subEl = $('tsub');
 const delEl = $('del');
-let noteTimer = 0, undoTimer = 0;
+let noteTimer = 0;
 
 // ---- 界面三态：待录 / 录音 / 已滑入取消区。颜色与文案都跟着走，别让用户猜 ----
 function setPhase(phase) {
@@ -277,13 +261,6 @@ function setPull(p) {
 function setText(text, placeholder) {
   textEl.textContent = text;
   textEl.classList.toggle('ph', !!placeholder);
-}
-
-// 撤回窗口只开 6 秒：再久一点，前台窗口可能已经换了，Ctrl+Z 会撤到别的东西上
-function showUndo() {
-  undoEl.classList.remove('hide');
-  clearTimeout(undoTimer);
-  undoTimer = setTimeout(() => undoEl.classList.add('hide'), 6000);
 }
 
 // 电脑侧的原因要说给手机上的人听：他看不到桌面，只能靠这一行判断该怎么办
@@ -396,8 +373,6 @@ function connect() {
       setText(msg.text || '（没有识别到内容）', !msg.text);
       // 提交了某条候选或单渠道定稿：候选列表的使命结束
       rowsEl.classList.add('hide');
-      // 有字才给撤回入口，空结果没什么可撤的
-      if (msg.text) showUndo(); else undoEl.classList.add('hide');
     } else if (msg.type === 'rows') {
       renderRows(msg.model);
     } else if (msg.type === 'shake') {
@@ -525,9 +500,6 @@ function begin() {
   setPhase('rec');
   setPull(0);
   waveOn();
-  // 录音中不给撤回入口：这一句还没定稿，撤的是上一句，容易按错
-  undoEl.classList.add('hide');
-  clearTimeout(undoTimer);
   delEl.classList.add('off');
   hintEl.textContent = rtc ? 'WebRTC' : '回落通道';
   timer = setInterval(() => {
@@ -570,11 +542,6 @@ $('enable').onclick = async () => {
     $('gate').querySelector('p').textContent = '麦克风打开失败：' + (e && e.message ? e.message : e);
   }
 };
-
-undoEl.addEventListener('click', () => {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ op: 'undo' }));
-  undoEl.classList.add('hide');
-});
 
 // ---- 按住说话：上滑越过阈值进入取消区，滑回来可以反悔 ----
 const PULL = 56, HYST = 14;

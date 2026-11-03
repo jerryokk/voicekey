@@ -14,7 +14,7 @@
 2. 手机扫码，点「启用麦克风」（浏览器会问一次权限）
 3. 在电脑上点好要输入的输入框，让光标停在那里
 4. 回到手机按住按钮说话，松手后文字自动打进去
-5. 说错了：按住时往上滑，按钮变红再松手，这一句直接丢弃；已经打出去的上句用卡片右下角的「撤回」
+5. 说错了：按住时往上滑，按钮变红再松手，这一句直接丢弃
 6. 想删字用左边的退格键：单击删一个字，按住连续删
 
 勾选两个以上渠道时是「多渠道」模式：说完手机会列出各家的结果和耗时，点一条上屏。
@@ -61,6 +61,17 @@ cargo build --release    # target/release/voicekey.exe
 ```
 
 要一个免安装的绿色目录，把这两份放一起就是完整的：`voicekey.exe` 与同级的 `runtime\tunnel\cloudflared.exe`。程序启动时按「资源目录 → 程序目录的 `runtime/tunnel/` → 编译期记录的位置 → PATH」找 cloudflared，放对一处即可。
+
+PowerShell 三行打出这个 zip（先完成上面的 release 构建）：
+
+```powershell
+New-Item -Force -ItemType Directory dist\VoiceKey\runtime\tunnel | Out-Null
+Copy-Item target\release\voicekey.exe dist\VoiceKey\ -Force
+Copy-Item app\src-tauri\binaries\cloudflared.exe dist\VoiceKey\runtime\tunnel\ -Force
+Compress-Archive -Force -Path dist\VoiceKey -DestinationPath dist\VoiceKey-1.0.0-x64-portable.zip
+```
+
+打 tag 推送后 CI 也会自动产出同样的 zip（`VoiceKey-$VER-x64-portable.zip`）。
 
 ## 测试与联调
 
@@ -111,7 +122,6 @@ WS 协议（`crates/remote/src/protocol.rs`）是手机页与电脑之间的唯�
 
 - **上屏不切窗口**：粘到当前前台。用户要先点好目标输入框；高权限窗口收不到模拟输入，这时自动改走剪贴板并在手机与浮层明说
 - 流式 `Typer`（退格 + 补打）与一次性 `paste` 是两条路径，开流式时不走剪贴板；外部退格会让 Typer 失准，录音中手机退格键被忽略
-- 撤销只开 8 秒窗口且要求当前没有句子在走：撤错东西比撤不了更糟
 - cloudflared 启动参数不能省：`--protocol auto`（屏蔽 UDP 的网络起不来）、metrics 绑 `127.0.0.1:0`（第二个实例抢端口）、stdout 与 stderr 都要读（只读一个会卡死）；从日志抠域名时要求行内含连字符，避免把 `api.trycloudflare.com` 当地址
 - 端口固定 47800；token 128 位放在 URL 里，WS 与信令都校验；服务只绑 `127.0.0.1`，只有 cloudflared 能进
 - 版本号唯一来源是根 `Cargo.toml` 的 `workspace.package.version`；`tauri.conf.json` 不写 version，发版时 CI 按标签覆盖

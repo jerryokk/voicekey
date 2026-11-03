@@ -52,8 +52,6 @@ pub enum Event {
     Abort(String),
     /// 用户在候选里选了一条，参数是渠道 id
     Commit(String),
-    /// 撤销上一句已经打出去的文字
-    Undo,
     /// 手机端请求往已上屏的文字里退格，参数是删除的字符数
     Erase(u32),
 }
@@ -418,12 +416,6 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
                     // 退格：删除已打到前台窗口里的字。上限拦住误触发的批量请求
                     Op::Backspace { n } => {
                         let _ = hub.events.send(Event::Erase(n.clamp(1, 50) as u32));
-                    }
-                    // 撤销上一句：和退格一样属于「已经上屏之后的修正」
-                    Op::Undo => {
-                        if hub.holder() == Some(conn) || hub.holder().is_none() {
-                            let _ = hub.events.send(Event::Undo);
-                        }
                     }
                 }
             }

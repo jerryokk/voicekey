@@ -19,8 +19,6 @@ pub enum Op {
     Stop,
     /// 上滑取消：这一句不要了，服务端丢弃音频、不跑识别、不上屏
     Cancel,
-    /// 撤销上一句已经打出去的文字
-    Undo,
     /// 删除前台窗口里的字。上限由服务端再夹一次，挡住误触发的批量请求
     Backspace {
         #[serde(default = "one")]
@@ -34,7 +32,7 @@ pub enum Op {
 
 impl Op {
     /// 全部 `op` 取值，对账测试要用
-    pub const NAMES: &'static [&'static str] = &["start", "stop", "cancel", "undo", "backspace", "commit", "offer"];
+    pub const NAMES: &'static [&'static str] = &["start", "stop", "cancel", "backspace", "commit", "offer"];
 }
 
 fn one() -> usize {
@@ -130,7 +128,6 @@ mod tests {
             (r#"{"op":"start"}"#, Op::Start),
             (r#"{"op":"stop"}"#, Op::Stop),
             (r#"{"op":"cancel"}"#, Op::Cancel),
-            (r#"{"op":"undo"}"#, Op::Undo),
             (r#"{"op":"backspace"}"#, Op::Backspace { n: 1 }),
             (r#"{"op":"backspace","n":3}"#, Op::Backspace { n: 3 }),
             (r#"{"op":"commit","channel":"qwen"}"#, Op::Commit { channel: "qwen".into() }),

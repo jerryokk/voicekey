@@ -52,17 +52,6 @@ pub fn backspace(n: usize) {
     send(&inputs);
 }
 
-/// 撤销：给前台窗口发一次 Ctrl+Z。
-/// 只能由「刚上屏完」的时机触发，隔久了会撤到别的东西上——调用方负责把关。
-pub fn undo() {
-    send(&[
-        key_input(0x11, 0, KEYBD_EVENT_FLAGS(0)),
-        key_input(0x5A, 0, KEYBD_EVENT_FLAGS(0)),
-        key_input(0x5A, 0, KEYEVENTF_KEYUP),
-        key_input(0x11, 0, KEYEVENTF_KEYUP),
-    ]);
-}
-
 pub(crate) fn type_text(text: &str) {
     let inputs: Vec<INPUT> = text
         .encode_utf16()
