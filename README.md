@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/icon.png" width="128" alt="VoiceKey"></p>
+<p align="center"><img src="app/src-tauri/icons/128x128.png" width="128" alt="VoiceKey"></p>
 
 <h1 align="center">VoiceKey</h1>
 
@@ -14,7 +14,8 @@
 2. 手机扫码，点「启用麦克风」（浏览器会问一次权限）
 3. 在电脑上点好要输入的输入框，让光标停在那里
 4. 回到手机按住按钮说话，松手后文字自动打进去
-5. 说错了用左边的退格键：单击删一个字，按住连续删
+5. 说错了：按住时往上滑，按钮变红再松手，这一句直接丢弃；已经打出去的上句用卡片右下角的「撤回」
+6. 想删字用左边的退格键：单击删一个字，按住连续删
 
 勾选两个以上渠道时是「多渠道」模式：说完手机会列出各家的结果和耗时，点一条上屏。
 
@@ -36,19 +37,30 @@
 
 ## 从源码构建
 
-需要 Rust（stable）、Node 22+、CMake、MSVC。`audiopus_sys` 会用 CMake 从源码编 libopus。
+需要 Rust（stable）、Node 22+、MSVC 生成工具。libopus 是仓库里预编译好的静态库，构建链只有 rustc、MSVC linker 和 node，没有 cmake、bindgen、pkg-config。
 
 ```bash
-# 打包前把 cloudflared 放到这里（CI 会自动下载）
+# cloudflared 放这里（不进 git，CI 会下载）
 mkdir -p app/src-tauri/binaries
 curl -L -o app/src-tauri/binaries/cloudflared.exe \
   https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
 
 cd app
 npm ci
-npx tauri dev            # 开发运行
-npx tauri build          # 出 msi / nsis 安装包
+npm run tauri -- dev                          # 开发：vite 热更新
+npm run tauri -- build                       # 安装包：target/release/bundle/{msi,nsis}
+npm run tauri -- build --bundles msi         # 只出 msi（本机缺 NSIS 工具链时用这个）
 ```
+
+界面在编译期嵌进 exe，所以不打安装包时也要先 `npm run build` 再 `cargo build`：
+
+```bash
+cd app && npm run build && cd ..
+cargo build              # target/debug/voicekey.exe，双击即用
+cargo build --release    # target/release/voicekey.exe
+```
+
+要一个免安装的绿色目录，把这两份放一起就是完整的：`voicekey.exe` 与同级的 `runtime\tunnel\cloudflared.exe`。程序启动时按「资源目录 → 程序目录的 `runtime/tunnel/` → 编译期记录的位置 → PATH」找 cloudflared，放对一处即可。
 
 命令行试识别（WAV 需 16kHz 单声道）：
 
@@ -72,7 +84,7 @@ cargo run -p voicekey-core --bin vk-test -- doubao 你的录音.wav
 | `crates/wtlocal` | 微信离线：解析官方模型、纯 Rust 推理 |
 | `app/src-tauri` | 会话状态机、托盘、浮层、设置 |
 | `app/src` | Svelte 界面 |
-| `tools/probe/` | 不用手机就能验证协议层的小工具，不参与正式构建 |
+| `app/src-tauri/icons` | 图标，`logo.py` 一次生成全部尺寸 |
 
 ## 声明
 
