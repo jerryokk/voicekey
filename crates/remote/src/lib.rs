@@ -330,7 +330,7 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>) {
             Message::Binary(chunk) => {
                 // 只有持有会话的设备，音频才算进这一句
                 if hub.holder() == Some(conn) {
-                    let samples: Vec<i16> = chunk.chunks_exact(2).map(|p| i16::from_le_bytes([p[0], p[1]])).collect();
+                    let samples: Vec<i16> = chunk.as_chunks::<2>().0.iter().map(|p| i16::from_le_bytes([p[0], p[1]])).collect();
                     inbox.push(&samples);
                 }
             }

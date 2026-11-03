@@ -95,7 +95,7 @@ impl Upload<'_> {
 impl Engine for WeTypeEngine {
     async fn prewarm(&self) {
         let mut slot = self.client.lock().await;
-        if slot.as_ref().map_or(true, |c| c.dead) {
+        if slot.as_ref().is_none_or(|c| c.dead) {
             *slot = Client::open().await.ok();
         }
     }
@@ -188,7 +188,7 @@ impl Client {
         } else {
             self.register().await?;
         }
-        if saved.as_ref().map_or(true, |s| s.device != self.device || s.uin != self.uin) {
+        if saved.as_ref().is_none_or(|s| s.device != self.device || s.uin != self.uin) {
             let id = Identity { device: self.device.clone(), uin: self.uin.clone() };
             let _ = std::fs::write(&file, serde_json::to_vec(&id)?);
         }
@@ -333,7 +333,7 @@ impl Client {
         }
         http = http.b(6, &body);
         let frame = PBuf::new().v(1, 0).v(2, 0).v(3, task_id).m(5, http);
-        self.ws.send(Message::Binary(frame.0.into())).await?;
+        self.ws.send(Message::Binary(frame.0)).await?;
 
         let raw = ws::recv(&mut self.ws, Duration::from_secs(15)).await?;
         let fields = match pb::parse(&raw)?.bytes(4) {

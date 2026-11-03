@@ -18,28 +18,6 @@ impl Lead {
     }
 }
 
-#[cfg(test)]
-mod lead_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn lead_pads_silence_then_plays_realtime() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        for i in 0..5 {
-            tx.send(vec![i; FRAME]).unwrap();
-        }
-        drop(tx);
-        let mut live = lead(rx);
-        let started = std::time::Instant::now();
-        let mut got = Vec::new();
-        while let Some(frame) = live.recv().await {
-            got.push(frame[0]);
-        }
-        assert_eq!(got, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4]);
-        assert!(started.elapsed() >= std::time::Duration::from_millis(200));
-    }
-}
-
 pub fn lead(mut audio: Audio) -> Lead {
     let (tx, rx) = mpsc::channel(1);
     tokio::spawn(async move {
@@ -183,4 +161,26 @@ pub fn file_frames(path: &str, realtime: bool) -> Result<Audio> {
         }
     });
     Ok(rx)
+}
+
+#[cfg(test)]
+mod lead_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn lead_pads_silence_then_plays_realtime() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        for i in 0..5 {
+            tx.send(vec![i; FRAME]).unwrap();
+        }
+        drop(tx);
+        let mut live = lead(rx);
+        let started = std::time::Instant::now();
+        let mut got = Vec::new();
+        while let Some(frame) = live.recv().await {
+            got.push(frame[0]);
+        }
+        assert_eq!(got, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4]);
+        assert!(started.elapsed() >= std::time::Duration::from_millis(200));
+    }
 }

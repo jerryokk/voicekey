@@ -38,6 +38,9 @@ pub fn qgemm(x: &QAct, w: &[i8], n: usize, ws: f32, bias: Option<&[f32]>) -> Vec
     let o = Out(out.as_mut_ptr());
     const TILE: usize = 32;
     (0..n.div_ceil(TILE)).into_par_iter().for_each(|ti| {
+        // 这行不是多余的：2021 的精确捕获会让闭包直接抓 `o.0`（*mut f32，非 Sync），
+        // 绑成局部变量后闭包抓的是 `Out`（有 unsafe impl Sync），才编得过
+        #[allow(clippy::redundant_locals)]
         let o = o;
         let n0 = ti * TILE;
         let n1 = (n0 + TILE).min(n);
@@ -48,9 +51,9 @@ pub fn qgemm(x: &QAct, w: &[i8], n: usize, ws: f32, bias: Option<&[f32]>) -> Vec
             while i < t {
                 let r2 = (t - i).min(2);
                 let acc = dot(&x.q[i * k..], r2, &w[j * k..], rows, k);
-                for a in 0..r2 {
+                for (a, row) in acc.iter().enumerate().take(r2) {
                     for b in 0..rows {
-                        let v = acc[a][b] as f32 * x.s[i + a] * ws + bias.map_or(0.0, |bb| bb[j + b]);
+                        let v = row[b] as f32 * x.s[i + a] * ws + bias.map_or(0.0, |bb| bb[j + b]);
                         unsafe { *o.0.add((i + a) * n + j + b) = v };
                     }
                 }
@@ -68,11 +71,11 @@ fn dot(x: &[i8], xr: usize, w: &[i8], wr: usize, k: usize) -> [[i32; 4]; 2] {
     let xp = [x.as_ptr(), x[(xr - 1) * k..].as_ptr()];
     let wp: [*const i8; 4] = std::array::from_fn(|b| w[b.min(wr - 1) * k..].as_ptr());
     #[cfg(target_arch = "aarch64")]
-    if k % 16 == 0 {
+    if k.is_multiple_of(16) {
         return unsafe { neon::dot2x4(xp, wp, k) };
     }
     #[cfg(target_arch = "x86_64")]
-    if k % 32 == 0 && avx2() {
+    if k.is_multiple_of(32) && avx2() {
         return unsafe { avx::dot2x4(xp, wp, k) };
     }
     let mut r = [[0i32; 4]; 2];
@@ -86,9 +89,10 @@ fn dot(x: &[i8], xr: usize, w: &[i8], wr: usize, k: usize) -> [[i32; 4]; 2] {
 
 fn dot1(a: &[i8], b: &[i8]) -> i32 {
     let mut acc = [0i32; 16];
-    let (ca, cb) = (a.chunks_exact(16), b.chunks_exact(16));
-    let (ra, rb) = (ca.remainder(), cb.remainder());
-    for (x, y) in ca.zip(cb) {
+    // 定长分块：块内下标是常量，编译期就能消掉边界检查
+    let (ca, ra) = a.as_chunks::<16>();
+    let (cb, rb) = b.as_chunks::<16>();
+    for (x, y) in ca.iter().zip(cb) {
         for i in 0..16 {
             acc[i] += x[i] as i32 * y[i] as i32;
         }
@@ -172,9 +176,9 @@ mod avx {
 #[inline]
 pub fn dotf(a: &[f32], b: &[f32]) -> f32 {
     let mut acc = [0f32; 8];
-    let (ca, cb) = (a.chunks_exact(8), b.chunks_exact(8));
-    let (ra, rb) = (ca.remainder(), cb.remainder());
-    for (x, y) in ca.zip(cb) {
+    let (ca, ra) = a.as_chunks::<8>();
+    let (cb, rb) = b.as_chunks::<8>();
+    for (x, y) in ca.iter().zip(cb) {
         for i in 0..8 {
             acc[i] += x[i] * y[i];
         }

@@ -40,7 +40,7 @@ fn request(token: &str, method: &str, payload: &str, audio: &[u8], rid: &str, fr
     if frame != 0 {
         pb = pb.v(9, frame);
     }
-    Message::Binary(pb.0.into())
+    Message::Binary(pb.0)
 }
 
 struct Response {

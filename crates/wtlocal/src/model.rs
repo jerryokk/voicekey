@@ -68,7 +68,9 @@ impl Loader<'_> {
         if r.dtype != F32 || r.dims != dims {
             bail!("{name} 形状不符：{:?}", r.dims);
         }
-        Ok(self.d[r.off..r.off + r.len].chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect())
+        // 定长分块省掉 try_into().unwrap()：长度在类型上就保证是 4
+        let bytes = &self.d[r.off..r.off + r.len];
+        Ok(bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect())
     }
     fn q(&self, name: &str, n: usize, k: usize) -> Result<Q> {
         let name = format!("{name}.weight_quantized_s8");

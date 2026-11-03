@@ -73,7 +73,7 @@ pub async fn start(exe: &Path, local_origin: &str) -> Result<Tunnel, String> {
     hide_window(&mut cmd);
 
     let mut child = cmd.spawn().map_err(|e| spawn_error(exe, e))?;
-    let found = wait_first(child.stdout.take(), child.stderr.take(), |line| quick_origin(line)).await;
+    let found = wait_first(child.stdout.take(), child.stderr.take(), quick_origin).await;
     let _ = std::fs::remove_file(&config);
     finish(child, found, "cloudflared 在分配地址前退出了，请检查网络")
 }

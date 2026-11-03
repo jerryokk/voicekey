@@ -152,7 +152,7 @@ impl Engine for ChatterflyEngine {
         let token = std::env::var("CHATTERFLY_TOKEN").unwrap_or_default();
         let (ws, body) = open(&token).await?;
         let (mut sink, mut stream) = ws.split();
-        sink.send(Message::Text(body.into())).await?;
+        sink.send(Message::Text(body)).await?;
 
         let mut text = String::new();
         let mut sent = 0usize;
@@ -167,7 +167,7 @@ impl Engine for ChatterflyEngine {
                     Some(pcm) => {
                         let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
                         sent += pcm.len();
-                        sink.send(Message::Binary(bytes.into())).await?;
+                        sink.send(Message::Binary(bytes)).await?;
                     }
                     None => {
                         closed = true;

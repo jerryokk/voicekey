@@ -55,7 +55,7 @@ impl QwenEngine {
 impl Engine for QwenEngine {
     async fn prewarm(&self) {
         let mut slot = self.session.lock().await;
-        if slot.as_ref().map_or(true, |s| s.dead) {
+        if slot.as_ref().is_none_or(|s| s.dead) {
             *slot = Session::open().await.ok();
         }
     }
@@ -121,7 +121,7 @@ impl Engine for QwenEngine {
 }
 
 fn bin(d: Vec<u8>) -> Message {
-    Message::Binary(d.into())
+    Message::Binary(d)
 }
 
 struct Transcript {

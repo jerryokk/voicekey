@@ -19,8 +19,8 @@ impl Opus {
             bail!("Opus 编码器创建失败");
         }
         unsafe {
-            ffi::opus_encoder_ctl(enc, ffi::OPUS_SET_BITRATE_REQUEST as i32, bitrate);
-            ffi::opus_encoder_ctl(enc, ffi::OPUS_SET_COMPLEXITY_REQUEST as i32, complexity);
+            ffi::opus_encoder_ctl(enc, ffi::OPUS_SET_BITRATE_REQUEST, bitrate);
+            ffi::opus_encoder_ctl(enc, ffi::OPUS_SET_COMPLEXITY_REQUEST, complexity);
         }
         Ok(Self { enc, buf: vec![0; 4000] })
     }

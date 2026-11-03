@@ -87,8 +87,5 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("failed to build app")
-        .run(|_app, e| match e {
-            RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
-            _ => {}
-        });
+        .run(|_app, e| if let RunEvent::ExitRequested { api, code: None, .. } = e { api.prevent_exit() });
 }
