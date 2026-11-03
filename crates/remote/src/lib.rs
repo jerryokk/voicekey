@@ -140,13 +140,6 @@ impl Service {
         format!("{}/?t={}", self.origin, self.hub.token.read().unwrap().clone())
     }
 
-    /// 断开所有手机：轮换 token（旧二维码立即失效）并通知在线页面退出。
-    /// 返回刷新后的扫码地址。
-    pub fn disconnect(&self) -> String {
-        self.hub.kick();
-        self.url()
-    }
-
     /// 公网域名（隧道不可用时为本地地址），用于诊断展示
     pub fn origin(&self) -> &str {
         &self.origin

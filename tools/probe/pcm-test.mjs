@@ -3,7 +3,7 @@
 // 用法：node pcm-test.mjs <ws 地址含 token> <wav 路径>
 const [, , url, wavPath] = process.argv;
 if (!url || !wavPath) {
-  console.error('用法：node pcm-test.mjs ws://127.0.0.1:47800/ws?t=xxxx ../ios/Resources/sample.wav');
+  console.error('用法：node pcm-test.mjs ws://127.0.0.1:47800/ws?t=xxxx C:////Windows////Media////Alarm01.wav');
   process.exit(2);
 }
 

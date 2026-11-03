@@ -103,10 +103,11 @@ node tools/probe/pcm-test.mjs "ws://127.0.0.1:47800/ws?t=<token>" <某个 16k �
 
 `Ctl` 是唯一的状态持有者，所有输入都是 `Msg`：
 
-- `Msg::Remote(Press/Release/Abort/Commit/Erase, Option<Audio>)` —— 手机端事件，Press 时附带本句音频；
-  `Erase(n)` 是手机退格键，`recording` 时忽略（流式 `Typer` 记着已打字数，外部退格会让它失准）
+- `Msg::Remote(Press/Release/Abort/Commit/Erase/Undo, Option<Audio>)` —— 手机端事件，Press 时附带本句音频；
+  `Erase(n)` 是手机退格键，`recording` 时忽略（流式 `Typer` 记着已打字数，外部退格会让它失准）；
+  `Undo` 只在「8 秒内且当前没有句子在走」时才发 Ctrl+Z（撤错东西比撤不了更糟）
 - `Mode`：`Idle / Single(ch) / Pick`（多渠道候选）
-- `gen`：每句自增，回传的 partial/done 带着它回来比对，不匹配直接丢
+- 代际与超时票号由 `Tickets` 持有（见上），partial/done 带代号回来比对，不匹配直接丢
 - `Segments`：支持「识别中再按一次接着说」，各段按顺序拼接，全部定稿才算完成
 - 松手后起 15 秒超时，超时按 abort 处理并保留已识别文字
 - `emit_rows` 33ms 节流，结果同时推给手机（`rows` / `partial`）和桌面浮层
