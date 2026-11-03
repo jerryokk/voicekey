@@ -4,6 +4,8 @@
 
 use crate::settings::Channel;
 use serde::Serialize;
+use voicekey_core::Audio;
+use voicekey_remote::Event as RemoteEvent;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -30,6 +32,20 @@ pub struct Model<'a> {
     pub sel: usize,
     /// 单渠道模式下这一句的实时文字（多渠道走 rows）
     pub text: String,
+}
+
+/// 会话收到的全部输入。控制器只有一个入口：`while let Some(m) = rx.recv()`。
+pub enum Msg {
+    /// 手机端事件，Press 时附带本句的音频流
+    Remote(RemoteEvent, Option<Audio>),
+    /// 引擎的中间结果，带发出时的代际
+    Partial { gen: u64, ch: Channel, seg: usize, text: String },
+    /// 引擎的定稿结果，带发出时的代际
+    Done { gen: u64, ch: Channel, seg: usize, res: Result<String, String> },
+    /// 等定稿的超时，带票号
+    Timeout { token: u64 },
+    /// `emit_rows` 的节流兑现
+    Flush,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

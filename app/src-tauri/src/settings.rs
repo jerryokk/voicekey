@@ -47,6 +47,12 @@ impl Channel {
         ]
     }
 
+    /// 多渠道默认勾选的渠道：**不含**微信离线——它要先下 100MB 模型，
+    /// 不该默认参与对比。默认值与「列表太短时的兜底」都用这一份，避免两处定义漂移。
+    pub fn default_multi() -> Vec<Channel> {
+        Self::engines().into_iter().filter(|&c| c != Self::WetypeOffline).collect()
+    }
+
     pub fn available() -> Vec<Channel> {
         let mut v = Self::engines();
         v.push(Channel::All);
@@ -78,7 +84,7 @@ impl Default for Settings {
             channel: Channel::Doubao,
             streaming: true,
             live_text: true,
-            multi: Channel::engines().into_iter().filter(|&c| c != Channel::WetypeOffline).collect(),
+            multi: Channel::default_multi(),
             last_pick: None,
             pick_counts: HashMap::new(),
             autostart: false,
@@ -111,8 +117,66 @@ impl Settings {
         let engines = Channel::engines();
         let mut multi: Vec<Channel> = engines.iter().copied().filter(|c| self.multi.contains(c)).collect();
         if multi.len() < 2 {
-            multi = engines;
+            multi = Channel::default_multi();
         }
         self.multi = multi;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 旧版本的配置文件缺新字段时，必须还能读出来。`serde(default)` +
+    /// `sanitize()` 是这条兼容性的全部实现，所以要有测试钉住。
+    #[test]
+    fn legacy_config_missing_fields_still_loads() {
+        let mut s: Settings = serde_json::from_str(r#"{"channel":"qwen","theme":"dark"}"#).unwrap();
+        s.sanitize();
+        assert_eq!(s.channel, Channel::Qwen);
+        assert_eq!(s.theme, "dark");
+        // 没写的字段取默认：流式与实时文字都开
+        assert!(s.streaming);
+        assert!(s.live_text);
+        // 多渠道没配过时取默认勾选（不含要下载模型的微信离线）
+        assert_eq!(s.multi, Channel::default_multi());
+    }
+
+    /// 多渠道至少要两家，否则那个模式没有意义
+    #[test]
+    fn multi_with_one_channel_is_expanded() {
+        let mut s: Settings = serde_json::from_str(r#"{"multi":["doubao"]}"#).unwrap();
+        s.sanitize();
+        assert_eq!(s.multi, Channel::default_multi());
+        assert!(!s.multi.contains(&Channel::WetypeOffline), "不该顺手把要下载模型的渠道勾上");
+    }
+
+    /// 手改过的 multi 可能重复、乱序，甚至含「全部」这种不该出现在列表里的值
+    #[test]
+    fn multi_is_deduped_and_ordered() {
+        let mut s: Settings =
+            serde_json::from_str(r#"{"multi":["sogou","doubao","sogou","all","baidu"]}"#).unwrap();
+        s.sanitize();
+        assert_eq!(s.multi, vec![Channel::Doubao, Channel::Baidu, Channel::Sogou]);
+    }
+
+    /// sanitize 必须幂等：设置会在每次启动和每次改动后跑一遍，
+    /// 非幂等会让「读出来—存回去」的循环里值越滚越偏。
+    #[test]
+    fn sanitize_is_idempotent() {
+        let mut s = Settings::default();
+        s.sanitize();
+        let once = s.clone();
+        s.sanitize();
+        assert_eq!(s.channel, once.channel);
+        assert_eq!(s.multi, once.multi);
+    }
+
+    /// 「全部」是合法的当前渠道（多渠道模式的入口），不该被当成非法值回落
+    #[test]
+    fn all_is_a_valid_current_channel() {
+        let mut s: Settings = serde_json::from_str(r#"{"channel":"all"}"#).unwrap();
+        s.sanitize();
+        assert_eq!(s.channel, Channel::All);
     }
 }

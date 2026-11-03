@@ -50,8 +50,8 @@ pub fn model_download(app: AppHandle, ch: Channel) {
 /// 渠道自检：用内置测试语音真跑一次，能拿到非空文字就算通
 #[tauri::command]
 pub async fn probe_channel(app: AppHandle, ch: Channel) -> serde_json::Value {
-    let engines = crate::session::engines::registry(app.state::<AppState>().qwen.clone());
-    let Some(engine) = engines.get(&ch).cloned() else {
+    let engines = crate::session::engines::Engines::new(app.state::<AppState>().qwen.clone());
+    let Some(engine) = engines.get(&ch) else {
         return json!({ "ok": false, "error": "未知渠道" });
     };
     match engine.probe().await {

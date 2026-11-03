@@ -3,18 +3,17 @@
 //! 状态机本身没变（Mode / gen / Segments / 超时 / 33ms 节流都是原来那套），
 //! 变的只是「谁开始一句话」：以前是全局快捷键加电脑麦克风，现在是手机端的 Press/Release，
 //! 音频由 `voicekey-remote` 交过来。用户松手就是结束，所以静音自动结束那套判定没有了。
+use crate::session::engines::Engines;
 use crate::session::machine::{Choice, Picker, Tickets};
-use crate::session::types::{Mode, Model, Segments};
+use crate::session::types::{Mode, Model, Msg, Segments};
 use crate::settings::{Channel, Settings};
 use crate::ui;
 use crate::AppState;
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use voicekey_core::{Audio, Engine, QwenEngine};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use voicekey_core::{Audio, QwenEngine};
 use voicekey_platform::{self as pf, Typer};
 use voicekey_remote::protocol;
 use voicekey_remote::{Event as RemoteEvent, Handle as RemoteHandle};
@@ -22,22 +21,13 @@ use voicekey_remote::{Event as RemoteEvent, Handle as RemoteHandle};
 /// 撤销时间窗：与手机页那个按钮的存活时间一致
 const UNDO_WINDOW: Duration = Duration::from_secs(8);
 
-pub enum Msg {
-    /// 手机端事件，Press 时附带本句的音频流
-    Remote(RemoteEvent, Option<Audio>),
-    Partial { gen: u64, ch: Channel, seg: usize, text: String },
-    Done { gen: u64, ch: Channel, seg: usize, res: Result<String, String> },
-    Timeout { token: u64 },
-    Flush,
-}
-
 pub struct Ctl {
     app: AppHandle,
     settings: Arc<RwLock<Settings>>,
     tx: UnboundedSender<Msg>,
     remote: Arc<RwLock<Option<RemoteHandle>>>,
-    engines: HashMap<Channel, Arc<dyn Engine>>,
-    tasks: Vec<JoinHandle<()>>,
+    /// 引擎注册表 + 本句的任务句柄（取消时一起停）
+    engines: Engines,
     /// 代际与超时票根：迟到的结果靠它作废
     tickets: Tickets,
     mode: Mode,
@@ -57,14 +47,12 @@ pub struct Ctl {
 
 pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) {
     let st = app.state::<AppState>();
-    let engines = crate::session::engines::registry(qwen);
     let ctl = Ctl {
         settings: st.settings.clone(),
         remote: st.remote.clone(),
         tx: st.tx.clone(),
         app: app.clone(),
-        engines,
-        tasks: Vec::new(),
+        engines: Engines::new(qwen),
         tickets: Tickets::default(),
         mode: Mode::Idle,
         recording: false,
@@ -182,11 +170,7 @@ impl Ctl {
     fn prewarm(&self) {
         let ch = self.settings().channel;
         let list = if ch == Channel::All { self.settings().multi } else { vec![ch] };
-        for c in list {
-            if let Some(e) = self.engines.get(&c).cloned() {
-                tauri::async_runtime::spawn(async move { e.prewarm().await });
-            }
-        }
+        self.engines.prewarm(&list);
     }
 
     fn begin_single(&mut self, ch: Channel, audio: Audio) {
@@ -203,7 +187,8 @@ impl Ctl {
         self.segs = Segments::default();
         let seg = self.segs.start();
         ui::hud(&self.app, "listen", "", ch);
-        self.spawn_engine(ch, seg, audio);
+        let (gen, tx) = (self.tickets.generation(), self.tx.clone());
+        self.engines.spawn(ch, seg, gen, audio, tx);
     }
 
     fn begin_multi(&mut self, channels: Vec<Channel>, audio: Audio) {
@@ -215,7 +200,8 @@ impl Ctl {
         // 行的排序、跳过、默认焦点都在 Picker 里，这里只负责把音频扇出去
         self.picker = Picker::new(channels, crate::model_ready, s.last_pick, &s.pick_counts);
         let targets = self.picker.start_round();
-        self.fan_out(audio, targets);
+        let (gen, tx) = (self.tickets.generation(), self.tx.clone());
+        self.engines.fan_out(audio, targets, gen, tx);
         self.emit_rows();
     }
 
@@ -229,46 +215,19 @@ impl Ctl {
         if let Mode::Single(ch) = self.mode {
             let seg = self.segs.start();
             self.hud_single(ch);
-            return self.spawn_engine(ch, seg, audio);
+            let (gen, tx) = (self.tickets.generation(), self.tx.clone());
+            return self.engines.spawn(ch, seg, gen, audio, tx);
         }
         self.released_at = None;
         let targets = self.picker.start_round();
-        self.fan_out(audio, targets);
+        let (gen, tx) = (self.tickets.generation(), self.tx.clone());
+        self.engines.fan_out(audio, targets, gen, tx);
         self.emit_rows();
     }
 
     fn hud_single(&self, ch: Channel) {
         let text = if self.settings.read().unwrap().live_text { self.segs.text() } else { String::new() };
         ui::hud(&self.app, if self.recording { "listen" } else { "wait" }, &text, ch);
-    }
-
-    fn fan_out(&mut self, mut audio: Audio, targets: Vec<(Channel, usize)>) {
-        let mut senders = Vec::new();
-        for (ch, seg) in targets {
-            let (t, r) = mpsc::unbounded_channel();
-            senders.push(t);
-            self.spawn_engine(ch, seg, r);
-        }
-        self.tasks.push(tauri::async_runtime::spawn(async move {
-            while let Some(f) = audio.recv().await {
-                for s in &senders {
-                    let _ = s.send(f.clone());
-                }
-            }
-        }));
-    }
-
-    fn spawn_engine(&mut self, ch: Channel, seg: usize, audio: Audio) {
-        let Some(engine) = self.engines.get(&ch).cloned() else { return };
-        let (gen, tx) = (self.tickets.generation(), self.tx.clone());
-        self.tasks.push(tauri::async_runtime::spawn(async move {
-            let ptx = tx.clone();
-            let partial = Box::new(move |t: &str| {
-                let _ = ptx.send(Msg::Partial { gen, ch, seg, text: t.to_string() });
-            });
-            let res = engine.run(audio, partial).await.map_err(|e| format!("{e:#}"));
-            let _ = tx.send(Msg::Done { gen, ch, seg, res });
-        }));
     }
 
     fn partial(&mut self, ch: Channel, seg: usize, text: String) {
@@ -307,7 +266,7 @@ impl Ctl {
                 }
                 self.recording = false;
                 self.tickets.next_timeout();
-                self.tasks.clear();
+                self.engines.abort_all();
                 self.mode = Mode::Idle;
                 let typer = self.typer.take();
                 let error = self.segs.error.take();
@@ -414,9 +373,7 @@ impl Ctl {
     fn cancel(&mut self) {
         self.tickets.next_generation();
         self.tickets.next_timeout();
-        for t in self.tasks.drain(..) {
-            t.abort();
-        }
+        self.engines.abort_all();
         self.recording = false;
         if let Some(mut t) = self.typer.take() {
             t.finish();

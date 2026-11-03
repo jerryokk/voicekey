@@ -11,7 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use voicekey_core::QwenEngine;
 use voicekey_remote::Handle as RemoteHandle;
 
-use crate::controller::Msg;
+use crate::session::types::Msg;
 use crate::settings::{Channel, Settings};
 use crate::{ui, wtoffline};
 

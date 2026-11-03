@@ -14,7 +14,7 @@ mod wtoffline;
 // 这些名字在 crate 各处被引用（controller / remote / ipc / ui），集中从这里转出
 pub use state::{model_ready, update_settings, AppState, RemoteStatus};
 
-use controller::Msg;
+use session::types::Msg;
 use serde_json::json;
 use settings::{Channel, Settings};
 use std::sync::Arc;

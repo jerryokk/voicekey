@@ -3,7 +3,7 @@
 //! 服务的生命周期等于应用的生命周期：随启动拉起，随退出消失。临时隧道地址每次启动
 //! 都会变，所以拿到地址后要立刻告诉前端刷新二维码。
 
-use crate::controller::Msg;
+use crate::session::types::Msg;
 use crate::{AppState, RemoteStatus};
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};

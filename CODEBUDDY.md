@@ -21,8 +21,9 @@ app/                 Tauri 外壳 + Svelte 界面
     ipc.rs           前端能调的全部命令，唯一接口面
     state.rs         AppState + update_settings（改设置的唯一入口）
     controller.rs    会话编排（调引擎、HUD、上屏、广播）
-    session/         types（分段/候选数据结构）、machine（选行与代际，可单测）、engines
-    ui.rs            托盘、浮层、两个窗口、坐标换算
+    session/         types（Msg / 分段 / 候选数据结构）、machine（选行与代际，可单测）、
+                     engines（注册表 + 本句任务句柄）
+    ui/              geometry（坐标与缩放）、windows（三个窗口）、overlay（胶囊）、tray（托盘）
     binaries/        cloudflared.exe 放这里（不进 git，打包时映射到资源目录）
 crates/
   core/              七家识别协议、音频分帧、Opus 编码
@@ -96,6 +97,10 @@ node tools/probe/pcm-test.mjs "ws://127.0.0.1:47800/ws?t=<token>" <某个 16k �
 - `Tickets`：代际与超时票号。引擎回结果可能晚于用户开下一句，代号对不上就作废。
 - `Picker`：多渠道候选的行构建（排序 / 跳过未下载模型 / 沿用上次选择）、
   定稿后焦点怎么挪、点击一条是「上屏 / 只切焦点 / 抖动提示」。
+- `Engines`：渠道→引擎的注册表，**同时持有本句的引擎任务句柄**——
+  取消一句话要能把它的任务一起停掉，句柄和「这句属于谁」必须放在一起。
+
+会话的输入统一是 `session::types::Msg`（`controller` 不再自己定义）。
 
 `controller.rs` 只剩编排（调引擎、HUD、上屏、广播）。改这两块的判断逻辑前先看
 `machine.rs` 里的测试——它们覆盖了多设备、渠道失败、用户手选与自动切换打架这几种情况。
