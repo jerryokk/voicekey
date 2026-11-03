@@ -9,7 +9,38 @@ permissions:
   contents: write
 
 jobs:
+  check:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test
+
+      # 界面是编译期嵌进 exe 的，没有 app/dist 连 voicekey 都编不过（不是测试才需要）
+      - name: Frontend
+        working-directory: app
+        run: |
+          npm ci
+          npm run build
+
+      - name: Test
+        run: cargo test --workspace --locked
+
   build:
+    needs: check
     runs-on: windows-latest
     defaults:
       run:
@@ -42,24 +73,28 @@ jobs:
           mkdir -p app/src-tauri/binaries
           curl -fsSL -o app/src-tauri/binaries/cloudflared.exe \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
-          ls -la app/src-tauri/binaries
 
       - name: Build
         working-directory: app
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           npm ci
-          npx tauri build --target x86_64-pc-windows-msvc --config "{\"version\":\"$VER\",\"bundle\":{\"createUpdaterArtifacts\":true}}"
+          npx tauri build --target x86_64-pc-windows-msvc --bundles msi,nsis \
+            --config "{\"version\":\"$VER\"}"
 
       - name: Package
         run: |
           mkdir -p dist
-          B=target/x86_64-pc-windows-msvc/release/bundle
-          cp $B/nsis/*-setup.exe "dist/VoiceKey-$VER-x64-setup.exe"
-          cp $B/nsis/*-setup.exe.sig "dist/VoiceKey-$VER-x64-setup.exe.sig"
-          cp $B/msi/*_zh-CN.msi "dist/VoiceKey-$VER-x64.msi"
+          B=target/x86_64-pc-windows-msvc/release
+          cp $B/bundle/nsis/*-setup.exe "dist/VoiceKey-$VER-x64-setup.exe"
+          cp $B/bundle/msi/*_zh-CN.msi "dist/VoiceKey-$VER-x64.msi"
+
+          # 免安装版：exe 与 runtime/tunnel/cloudflared.exe 放在一起即可运行
+          mkdir -p staging/VoiceKey/runtime/tunnel
+          cp $B/voicekey.exe staging/VoiceKey/
+          cp app/src-tauri/binaries/cloudflared.exe staging/VoiceKey/runtime/tunnel/
+          ZIP="$(command -v 7z || echo '/c/Program Files/7-Zip/7z.exe')"
+          "$ZIP" a -tzip "dist/VoiceKey-$VER-x64-portable.zip" ./staging/VoiceKey > /dev/null
+          rm -rf staging
 
       - uses: actions/upload-artifact@v4
         with:
@@ -71,26 +106,15 @@ jobs:
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: Updater manifest
-        run: |
-          VER="${GITHUB_REF_NAME#v}"
-          URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
-          WIN="VoiceKey-$VER-x64-setup.exe"
-          jq -n --arg v "$VER" --arg d "$(date -u +%FT%TZ)" \
-            --arg ws "$(cat dist/$WIN.sig)" --arg wu "$URL/$WIN" \
-            '{version: $v, pub_date: $d, platforms: {"windows-x86_64": {signature: $ws, url: $wu}}}' > dist/latest.json
-          rm dist/*.sig
-
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "VoiceKey $GITHUB_REF_NAME" --generate-notes \
-            --notes "Windows 安装包。手机与电脑需要在同一台机器上配合：装好后打开设置，用手机扫「手机接入」里的二维码，按住说话即可。公网地址每次启动都会变，谁拿到它谁就能往这台电脑输入文字，不要外传。"
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "VoiceKey $GITHUB_REF_NAME" --generate-notes \
+            --notes "Windows 安装包（msi / exe）与免安装压缩包。装好后打开设置，用手机扫「手机接入」里的二维码，按住说话即可；按住时上滑可取消这一句。公网地址每次启动都会变，谁拿到它谁就能往这台电脑输入文字，不要外传。"
