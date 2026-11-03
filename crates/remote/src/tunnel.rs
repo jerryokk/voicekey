@@ -18,6 +18,9 @@ const QUICK_DOMAIN: &str = ".trycloudflare.com";
 pub struct Tunnel {
     child: Child,
     origin: String,
+    /// Windows 作业对象：句柄在本进程里，本进程无论怎么退（正常退出、崩溃、被强杀），
+    /// 内核关闭句柄时都会按 kill-on-close 连带结束 cloudflared。只包含我们自己启动的那个。
+    _job: Option<Job>,
 }
 
 impl Tunnel {
@@ -29,10 +32,67 @@ impl Tunnel {
 
 impl Drop for Tunnel {
     fn drop(&mut self) {
-        // 进程退出必须带走隧道，否则公网域名会指着一个已经不属于我们的端口
+        // 进程退出必须带走隧道，否则公网域名会指着一个已经不属于我们的端口。
+        // 常规路径 start_kill 就够；作业对象兜底的是「Drop 来不及跑」的强杀场景。
         let _ = self.child.start_kill();
     }
 }
+
+/// 把子进程绑进一个 kill-on-close 的作业对象。失败（嵌套作业受限、进程已退出）只意味着
+/// 退回「常规 Drop 兜底」，不值得报错。
+#[cfg(windows)]
+fn bind_to_job(child: &Child) -> Option<Job> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job == 0 {
+            return None;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let set = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const _,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        let handle = child.raw_handle().map(|h| h as isize);
+        let assigned = set != 0
+            && handle.is_some_and(|h| AssignProcessToJobObject(job, h) != 0);
+        if assigned {
+            Some(Job { handle: job })
+        } else {
+            CloseHandle(job);
+            None
+        }
+    }
+}
+
+#[cfg(windows)]
+struct Job {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl Drop for Job {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+    }
+}
+
+#[cfg(not(windows))]
+fn bind_to_job(_child: &Child) -> Option<Job> {
+    None
+}
+
+#[cfg(not(windows))]
+struct Job;
 
 /// 在几个常规位置找 cloudflared：显式指定 → 程序目录的 runtime/tunnel → PATH
 pub fn find(explicit: Option<PathBuf>) -> Option<PathBuf> {
@@ -73,9 +133,10 @@ pub async fn start(exe: &Path, local_origin: &str) -> Result<Tunnel, String> {
     hide_window(&mut cmd);
 
     let mut child = cmd.spawn().map_err(|e| spawn_error(exe, e))?;
+    let job = bind_to_job(&child);
     let found = wait_first(child.stdout.take(), child.stderr.take(), quick_origin).await;
     let _ = std::fs::remove_file(&config);
-    finish(child, found, "cloudflared 在分配地址前退出了，请检查网络")
+    finish(child, found, job, "cloudflared 在分配地址前退出了，请检查网络")
 }
 
 fn temp_config() -> Result<PathBuf, String> {
@@ -95,6 +156,9 @@ fn spawn_error(exe: &Path, e: std::io::Error) -> String {
 }
 
 fn hide_window(cmd: &mut Command) {
+    // kill_on_drop 是第一层兜底：哪怕 Tunnel 还没建成就放弃（比如隧道建到一半失败），
+    // Child 一被丢弃也会发终止信号
+    cmd.kill_on_drop(true);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {
@@ -117,10 +181,11 @@ where
 fn finish(
     mut child: Child,
     found: Result<(Option<String>, Option<String>), tokio::time::error::Elapsed>,
+    job: Option<Job>,
     early_exit: &str,
 ) -> Result<Tunnel, String> {
     match found {
-        Ok((Some(origin), _)) => Ok(Tunnel { child, origin }),
+        Ok((Some(origin), _)) => Ok(Tunnel { child, origin, _job: job }),
         Ok((None, detail)) => {
             let _ = child.start_kill();
             let reason = detail.unwrap_or_default();

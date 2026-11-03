@@ -120,6 +120,7 @@ WS 协议（`crates/remote/src/protocol.rs`）是手机页与电脑之间的唯�
 
 ## 实现要点
 
+- **cloudflared 绑在 kill-on-close 的作业对象里**：voicekey 无论正常退出、崩溃还是被强杀，内核都会带走它启动的那个 cloudflared，且不影响机器上其他 cloudflared 实例
 - **上屏不切窗口**：粘到当前前台。用户要先点好目标输入框；高权限窗口收不到模拟输入，这时自动改走剪贴板并在手机与浮层明说
 - 流式 `Typer`（退格 + 补打）与一次性 `paste` 是两条路径，开流式时不走剪贴板；外部退格会让 Typer 失准，录音中手机退格键被忽略
 - cloudflared 启动参数不能省：`--protocol auto`（屏蔽 UDP 的网络起不来）、metrics 绑 `127.0.0.1:0`（第二个实例抢端口）、stdout 与 stderr 都要读（只读一个会卡死）；从日志抠域名时要求行内含连字符，避免把 `api.trycloudflare.com` 当地址

@@ -6015,6 +6015,7 @@ dependencies = [
  "tokio",
  "voicekey-core",
  "webrtc",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
