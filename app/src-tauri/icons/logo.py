@@ -1,9 +1,9 @@
-"""生成 VoiceKey 的全部图标（应用图标、托盘、README）。
+"""生成 VoiceKey 的全部图标（应用、托盘，README 也直接引用这里的 128x128）。
 
 设计：深色圆角徽章 + 麦克风。灯头用暖橙渐变（唯一彩色元素，视线焦点），
 支架白色——16px 缩到托盘尺寸时仍能辨认轮廓。
 
-用法：python tools/logo.py
+用法：python app/src-tauri/icons/logo.py
 依赖：Pillow（WinPython 自带）
 """
 
@@ -11,8 +11,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-ROOT = Path(__file__).resolve().parent.parent
-ICONS = ROOT / "app" / "src-tauri" / "icons"
+ICONS = Path(__file__).resolve().parent
+ROOT = ICONS.parents[2]
 
 S = 1024  # 超采样画布，最后缩到目标尺寸
 ORANGE_TOP = (255, 160, 106)
@@ -93,7 +93,6 @@ def main():
     render(32).save(ICONS / "32x32.png")
     render(128).save(ICONS / "128x128.png")
     render(256).save(ICONS / "128x128@2x.png")
-    render(256).save(ROOT / "docs" / "icon.png")
 
     # Windows 图标文件：多尺寸打包
     sizes = [16, 24, 32, 48, 64, 128, 256]

@@ -7,7 +7,7 @@ edition.workspace = true
 # 这样 `cargo build` 出来的 target/debug/voicekey.exe 双击就能跑，
 # 不依赖 vite 开发服务器（否则会去连 localhost:1420 报「拒绝连接」）。
 # 改前端后需要先 `npm run build` 再重新编译；要热更新的开发循环用
-# `npx tauri dev --no-default-features`（走 devUrl）。
+# `npm run tauri -- dev`——CLI 会自己加 `--no-default-features`，走 devUrl。
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
@@ -29,8 +29,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 anyhow = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 futures-util = "0.3"
-sha2 = "0.10"
 md-5 = "0.10"
 hex = "0.4"
-base64 = "0.22"
 qrcode = "0.14"

@@ -6,7 +6,6 @@ edition.workspace = true
 # 手机接入层：只依赖 core，不依赖 tauri，便于单独测试
 [dependencies]
 voicekey-core = { path = "../core" }
-anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "sync", "time"] }
 futures-util = "0.3"
