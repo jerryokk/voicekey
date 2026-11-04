@@ -1,9 +1,9 @@
 use crate::pb::PBuf;
-use crate::util::{data_file, now_ms};
+use crate::util::{now_ms, urlencode, IdFile};
 use crate::ws::{self, Ws};
 use crate::{Audio, Engine, Partial};
 use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
@@ -19,14 +19,9 @@ const ORIGIN: &str = "https://www.qianwen.com";
 const HMAC_KEY: &[u8] = b"2d473b000fdb53e617446f805d4eaaacbb324bd16ee9f6d8237abd0ab79c5e48";
 const AES_KEY: &[u8] = b"a0a6237b2b735a54";
 const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15 TONGYI_DESKTOP/0.1.0 QuarkPC/ime_voice";
+/// 120ms 16 位 PCM
 const CHUNK: usize = 3840;
-
-fn debug(tag: &str, d: &[u8]) {
-    if std::env::var_os("QWEN_DEBUG").is_some() {
-        let s = String::from_utf8_lossy(d);
-        eprintln!("QWEN_{tag} {}", s.chars().take(800).collect::<String>());
-    }
-}
+const ID: IdFile = IdFile("qwen.json");
 
 /// 千问输入法 ASR：WSG 签名（HMAC-SHA1 + AES-128-CBC），HTTP/1.1 升级后发 protobuf 帧（attach → asr/send PCM → complete）
 #[derive(Default)]
@@ -41,13 +36,7 @@ impl QwenEngine {
                 return Ok((s, true));
             }
         }
-        match Session::open().await {
-            Ok(s) => Ok((s, false)),
-            Err(e) => {
-                QwenDevice::reset();
-                Err(e)
-            }
-        }
+        Ok((Session::open().await?, false))
     }
 }
 
@@ -71,7 +60,7 @@ impl Engine for QwenEngine {
             s.ensure_attach().await?;
         }
 
-        let mut t = Transcript { partial, asr: String::new(), asr_done: false };
+        let mut t = Transcript { partial, text: String::new(), done: false };
         let ws = s.ws.take().ok_or_else(|| anyhow!("千问连接缺失"))?;
         let (mut sink, mut stream) = ws.split();
         let result: Result<()> = async {
@@ -87,7 +76,7 @@ impl Engine for QwenEngine {
                         }
                     }
                     m = stream.next() => {
-                        if let Some(d) = ws::data(m)? { s.handle(&d, &mut t); }
+                        if let Some(d) = ws::data(m)? { s.handle(&d, &mut t)?; }
                     }
                 }
             }
@@ -96,71 +85,57 @@ impl Engine for QwenEngine {
                 sink.send(bin(s.asr_send(&pcm))).await?;
             }
             sink.send(bin(s.asr_complete())).await?;
-            let deadline = Instant::now() + Duration::from_millis(2000);
-            while !t.asr_done && Instant::now() < deadline {
-                if let Some(d) = ws::recv_opt(&mut stream, deadline - Instant::now()).await? {
-                    s.handle(&d, &mut t);
-                }
+            // complete 之后服务端下发 newRoundId 即本轮定稿
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !t.done {
+                let d = ws::recv_opt(&mut stream, deadline - Instant::now()).await?.context("千问定稿超时")?;
+                s.handle(&d, &mut t)?;
             }
             Ok(())
         }
         .await;
-        if let Err(e) = result {
-            let text = t.result();
-            return if text.is_empty() { Err(e) } else { Ok(text) };
-        }
+        result?;
         s.ws = Some(sink.reunite(stream).map_err(|_| anyhow!("千问连接合并失败"))?);
-        s.reset();
+        // 下一轮重新 attach
+        s.session_id.clear();
+        s.round_id.clear();
         *self.session.lock().await = Some(s);
-        let text = t.result();
-        if text.is_empty() {
-            bail!("千问没有识别文本");
-        }
-        Ok(text)
+        Ok(t.text)
     }
 }
 
 fn bin(d: Vec<u8>) -> Message {
-    Message::Binary(d)
+    Message::Binary(d.into())
 }
 
 struct Transcript {
     partial: Partial,
-    asr: String,
-    asr_done: bool,
+    text: String,
+    done: bool,
 }
 
 impl Transcript {
-    fn result(&self) -> String {
-        self.asr.clone()
-    }
-
-    fn walk(&mut self, v: &Value) {
-        match v {
-            Value::Object(d) => {
-                if let Some(t) = d.get("content").and_then(|c| c.get("text")).and_then(Value::as_str).filter(|s| !s.is_empty()) {
-                    self.asr = t.into();
-                    (self.partial)(t);
-                }
-                if let Some(ms) = d.get("messages").and_then(Value::as_array) {
-                    for m in ms {
-                        if let Some(s) = m.get("content").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-                            let _ = (m, s);
-                        }
-                    }
-                }
-                for (k, v) in d {
-                    match v.as_str().filter(|s| !s.is_empty()) {
-                        Some(s) if k == "translatedText" || k == "translated_text" => {
-                            let _ = s;
-                        }
-                        _ => self.walk(v),
-                    }
-                }
-            }
-            Value::Array(a) => a.iter().for_each(|v| self.walk(v)),
-            _ => {}
+    /// 一条下行消息里的累计识别文本，变化时才回调 partial
+    fn update(&mut self, v: &Value) {
+        if let Some(t) = content_text(v).filter(|t| *t != self.text) {
+            self.text = t.into();
+            (self.partial)(t);
         }
+    }
+}
+
+/// 识别结果在下行 JSON 任意层级的 content.text：深度优先取第一个非空值，同层先看本对象、
+/// 再按 key 字典序（serde_json 的 Map 按 key 排序）和数组下标深入，结果与字段顺序无关
+fn content_text(v: &Value) -> Option<&str> {
+    match v {
+        Value::Object(d) => d
+            .get("content")
+            .and_then(|c| c.get("text"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .or_else(|| d.values().find_map(content_text)),
+        Value::Array(a) => a.iter().find_map(content_text),
+        _ => None,
     }
 }
 
@@ -170,7 +145,6 @@ struct Session {
     dead: bool,
     session_id: String,
     round_id: String,
-    attached: bool,
 }
 
 impl Session {
@@ -181,10 +155,7 @@ impl Session {
         let h = auth.headers();
         headers.extend(h.iter().map(|(k, v)| (*k, v.as_str())));
         let ws = ws::connect(&url, &headers).await.map_err(|e| anyhow!("千问 {e}"))?;
-        Ok(Self {
-            auth, ws: Some(ws), dead: false, session_id: String::new(), round_id: String::new(),
-            attached: false,
-        })
+        Ok(Self { auth, ws: Some(ws), dead: false, session_id: String::new(), round_id: String::new() })
     }
 
     fn ws(&mut self) -> Result<&mut Ws> {
@@ -192,7 +163,7 @@ impl Session {
     }
 
     async fn ensure_attach(&mut self) -> Result<()> {
-        if self.attached && !self.session_id.is_empty() {
+        if !self.session_id.is_empty() {
             return Ok(());
         }
         let r = self.attach().await;
@@ -208,8 +179,7 @@ impl Session {
         let deadline = Instant::now() + Duration::from_secs(8);
         while Instant::now() < deadline && self.session_id.is_empty() {
             let Some(d) = ws::recv_opt(self.ws()?, Duration::from_secs(2)).await? else { continue };
-            debug("ATTACH", &d);
-            let Ok(v) = serde_json::from_slice::<Value>(&d) else { continue };
+            let v: Value = serde_json::from_slice(&d).context("千问响应解析失败")?;
             if let Some(sid) = v["data"]["sessionId"].as_str().filter(|s| !s.is_empty()) {
                 self.note_session(sid, v["data"]["roundId"].as_str());
             }
@@ -220,31 +190,18 @@ impl Session {
         Ok(())
     }
 
-    fn handle(&mut self, d: &[u8], t: &mut Transcript) {
-        debug("DOWN", d);
-        let Ok(v) = serde_json::from_slice::<Value>(d) else { return };
-        if let Some(sid) = v["data"]["sessionId"].as_str().filter(|s| !s.is_empty()) {
-            if v["route"] == "/voice_assistant/channel/attach" {
-                self.note_session(sid, v["data"]["roundId"].as_str());
-            }
-            if let Some(nr) = v["data"]["newRoundId"].as_str().filter(|s| !s.is_empty()) {
-                self.round_id = nr.into();
-                t.asr_done = true;
-            }
+    fn handle(&mut self, d: &[u8], t: &mut Transcript) -> Result<()> {
+        let v: Value = serde_json::from_slice(d).context("千问响应解析失败")?;
+        t.update(&v);
+        if v["data"]["newRoundId"].as_str().is_some_and(|s| !s.is_empty()) {
+            t.done = true;
         }
-        t.walk(&v);
+        Ok(())
     }
 
     fn note_session(&mut self, id: &str, round: Option<&str>) {
         self.session_id = id.into();
         self.round_id = round.filter(|r| !r.is_empty()).map(String::from).unwrap_or_else(|| format!("ro_{id}_0"));
-        self.attached = true;
-    }
-
-    fn reset(&mut self) {
-        self.attached = false;
-        self.session_id.clear();
-        self.round_id.clear();
     }
 
     fn attach_packet(&self) -> Result<Vec<u8>> {
@@ -297,24 +254,6 @@ struct QwenDevice {
     utdid: String,
 }
 
-impl QwenDevice {
-    fn load() -> String {
-        let file = data_file("qwen.json");
-        if let Some(d) = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice::<QwenDevice>(&b).ok()) {
-            if !d.utdid.is_empty() {
-                return d.utdid;
-            }
-        }
-        let utdid = format!("VK{}", &uuid::Uuid::new_v4().simple().to_string().to_uppercase()[..20]);
-        let _ = std::fs::write(&file, serde_json::to_vec(&QwenDevice { utdid: utdid.clone() }).unwrap());
-        utdid
-    }
-
-    fn reset() {
-        let _ = std::fs::remove_file(data_file("qwen.json"));
-    }
-}
-
 struct QwenAuth {
     ut: String,
     chid: String,
@@ -324,7 +263,9 @@ struct QwenAuth {
 
 impl QwenAuth {
     fn make() -> Result<Self> {
-        let utdid = QwenDevice::load();
+        let utdid = ID
+            .get_or_create(|| QwenDevice { utdid: format!("VK{}", &uuid::Uuid::new_v4().simple().to_string().to_uppercase()[..20]) })?
+            .utdid;
         let enc = cbc::Encryptor::<aes::Aes128>::new(AES_KEY.into(), AES_KEY.into()).encrypt_padded_vec_mut::<Pkcs7>(utdid.as_bytes());
         let mut packed = vec![0x4e, 0xa4];
         packed.extend(enc);
@@ -339,7 +280,7 @@ impl QwenAuth {
 
     fn headers(&self) -> Vec<(&'static str, String)> {
         vec![
-            ("clt-acs-ut", qenc(&self.ut)),
+            ("clt-acs-ut", urlencode(&self.ut)),
             ("clt-acs-ve", VE.into()),
             ("clt-acs-kp", String::new()),
             ("clt-acs-reqt", self.reqt.clone()),
@@ -355,16 +296,7 @@ impl QwenAuth {
         format!(
             "chid={}&biz_id=ai_qwen_input&from=kkframenew_quark_asr&uc_param_str=vepffrprsvchut&ut={}&ve={VE}&pf=8002&pr=qwen&fr=mac&sv=release&ch=qianwen-ime",
             self.chid,
-            qenc(&self.ut)
+            urlencode(&self.ut)
         )
     }
-}
-
-fn qenc(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
 }

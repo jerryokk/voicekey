@@ -4,7 +4,8 @@ import Settings from "./Settings.svelte";
 import Hud from "./Hud.svelte";
 import Qr from "./Qr.svelte";
 
-const view: string = (window as any).__VK_VIEW ?? location.hash.slice(1);
+// 三个窗口都由后端建，建窗时注入 __VK_VIEW 指明自己是哪一个（见 ui/windows.rs）
+const view: string = (window as any).__VK_VIEW;
 const target = document.getElementById("app")!;
-document.body.classList.add(view === "hud" ? "transparent" : "opaque");
+if (view === "hud") document.body.classList.add("transparent");
 mount(view === "hud" ? Hud : view === "qr" ? Qr : Settings, { target });

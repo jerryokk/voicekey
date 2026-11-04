@@ -4,7 +4,6 @@
 
 use crate::settings::Channel;
 use serde::Serialize;
-use voicekey_core::Audio;
 use voicekey_remote::Event as RemoteEvent;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Debug)]
@@ -20,24 +19,23 @@ pub enum RowState {
 #[derive(Clone, Serialize)]
 pub struct Row {
     pub channel: Channel,
+    /// 手机页直接显示的渠道名：页面不维护自己的渠道表
+    pub name: &'static str,
     pub text: String,
     pub state: RowState,
-    pub ms: Option<u64>,
 }
 
-#[derive(Clone, Serialize)]
+/// 多渠道候选的快照，整份推给手机
+#[derive(Serialize)]
 pub struct Model<'a> {
-    pub recording: bool,
     pub rows: &'a [Row],
     pub sel: usize,
-    /// 单渠道模式下这一句的实时文字（多渠道走 rows）
-    pub text: String,
 }
 
 /// 会话收到的全部输入。控制器只有一个入口：`while let Some(m) = rx.recv()`。
 pub enum Msg {
-    /// 手机端事件，Press 时附带本句的音频流
-    Remote(RemoteEvent, Option<Audio>),
+    /// 手机端事件，Press 自带本句的音频流
+    Remote(RemoteEvent),
     /// 引擎的中间结果，带发出时的代际
     Partial { gen: u64, ch: Channel, seg: usize, text: String },
     /// 引擎的定稿结果，带发出时的代际
@@ -46,6 +44,8 @@ pub enum Msg {
     Timeout { token: u64 },
     /// `emit_rows` 的节流兑现
     Flush,
+    /// 手机接入整套重启或隧道断了：所有设备都已离线，说到一半的那句按断线处理
+    Reset(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -106,7 +106,6 @@ impl Segments {
         self.parts.iter().map(|p| p.0.as_str()).collect()
     }
 }
-
 
 #[cfg(test)]
 mod tests {

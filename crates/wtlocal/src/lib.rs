@@ -1,4 +1,4 @@
-//! 微信输入法离线识别：直接加载官方模型包（xnet），纯 Rust 推理，全平台可用
+//! 微信输入法离线识别：直接加载官方模型包（xnet），纯 Rust 推理（Windows x86_64，AVX2 内核带标量回退）
 mod fbank;
 mod kernels;
 mod model;

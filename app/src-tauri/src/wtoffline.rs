@@ -1,4 +1,4 @@
-//! 微信离线：从微信输入法资源 CDN 下载官方语音包并解包，推理由 voicekey-wtlocal 完成（全平台）
+//! 微信离线：从微信输入法资源 CDN 下载官方语音包并解包，推理由 voicekey-wtlocal 完成
 use anyhow::{bail, Result};
 use futures_util::StreamExt;
 use md5::{Digest, Md5};

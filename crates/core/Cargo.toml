@@ -7,10 +7,9 @@ edition.workspace = true
 anyhow = "1"
 async-trait = "0.1"
 opus-sys = { path = "../opus-sys" }
-rubato = "0.16"
 hound = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 serde = { version = "1", features = ["derive"] }
@@ -25,12 +24,8 @@ sha1 = "0.10"
 sha2 = "0.10"
 hmac = "0.12"
 base64 = "0.22"
-rsa = { version = "0.9", features = ["sha2"] }
+rsa = "0.9"
 hex = "0.4"
 dirs = "5"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 bytes = "1"
-
-[[bin]]
-name = "vk-test"
-path = "src/bin/vk-test.rs"

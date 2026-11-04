@@ -22,7 +22,7 @@ cmake --build build --config Release
 cp build/Release/opus.lib lib/
 ```
 
-## 换行注意
+## ctl 传参注意
 
 `opus_encoder_ctl` 是 C 可变参数协议，Rust 侧声明为 `...`，传参必须与
 opus.h 中对应宏要求的类型一致（bitrate 是 int，final_range 是 `*mut u32`）。

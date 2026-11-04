@@ -1,4 +1,4 @@
-//! 屏幕底部的胶囊浮层：录音 / 等待 / 出错三态。
+//! 屏幕底部的胶囊浮层：录音、识别中、出错、提示四态。
 //!
 //! 它只是个展示窗口，不接收输入（`set_ignore_cursor_events`），
 //! 所以显隐全靠后端推事件。`HUD_TOKEN` 解决的是「上一条延时隐藏」和
@@ -11,7 +11,7 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::settings::Channel;
-use crate::AppState;
+use crate::state::AppState;
 
 use super::geometry::cursor_area;
 use super::windows::place_hud;

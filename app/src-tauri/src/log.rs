@@ -2,27 +2,22 @@
 //!
 //! 改成 Windows GUI 子系统后没有控制台，stderr 无从查看；出问题只能靠用户描述。
 //! 这里把关键事件写进 `%LOCALAPPDATA%\VoiceKey\logs\voicekey-YYYYMMDD.log`，
-//! 按天切分、只保留 7 天，量很小。
+//! 按天（UTC）切分、只保留 7 个文件，量很小。常驻跨天时，写入那一刻发现日期变了就换文件并清理旧的。
 //!
 //! 只记录事件与原因，不记录 token（URL 里带 token，日志里一律只打 origin）。
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-static LOG_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+static LOG_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+/// 当前日志文件对应的日期；与写入时的日期不同就换文件
+static DAY: Mutex<String> = Mutex::new(String::new());
 
 pub fn init() {
-    let path = dir().map(|d| {
-        let _ = fs::create_dir_all(&d);
-        d.join(format!("voicekey-{}.log", date_stamp(now_secs())))
-    });
-    if let Some(p) = &path {
-        prune(&p.parent().map(PathBuf::from));
-    }
-    let _ = LOG_PATH.set(path);
+    let _ = LOG_DIR.set(dir().filter(|d| fs::create_dir_all(d).is_ok()));
     write("info", "启动");
 }
 
@@ -38,8 +33,7 @@ fn now_secs() -> u64 {
 }
 
 /// 只保留最近 7 个日志文件
-fn prune(dir: &Option<PathBuf>) {
-    let Some(dir) = dir else { return };
+fn prune(dir: &Path) {
     let Ok(rd) = fs::read_dir(dir) else { return };
     let mut files: Vec<_> = rd
         .flatten()
@@ -56,9 +50,19 @@ fn prune(dir: &Option<PathBuf>) {
 }
 
 pub fn write(level: &str, message: &str) {
-    let Some(Some(path)) = LOG_PATH.get() else { return };
+    let Some(Some(dir)) = LOG_DIR.get() else { return };
+    let secs = now_secs();
+    let today = date_stamp(secs);
+    // 锁持到写完：并发写入不会交错成半行，跨天时也只清理一次
+    let mut day = DAY.lock().unwrap();
+    let path = dir.join(format!("voicekey-{today}.log"));
     let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) else { return };
-    let _ = writeln!(f, "[{}] {:5} {}", clock(now_secs()), level.to_uppercase(), message);
+    let _ = writeln!(f, "[{}] {:5} {}", clock(secs), level.to_uppercase(), message);
+    // 今天的文件已经建出来了再清理：按名字排序时它一定在保留的 7 个里
+    if *day != today {
+        *day = today;
+        prune(dir);
+    }
 }
 
 fn date_stamp(secs: u64) -> String {
@@ -74,18 +78,7 @@ fn clock(secs: u64) -> String {
 
 /// epoch 秒 → 年月日（UTC；日志不需要本地时区）
 fn ymd(secs: u64) -> (i64, u32, u32) {
-    let days = (secs / 86_400) as i64;
-    // Howard Hinnant 的 civil_from_days
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
+    voicekey_core::util::civil_from_days((secs / 86_400) as i64)
 }
 
 #[macro_export]
@@ -107,8 +100,7 @@ macro_rules! log_error {
 mod tests {
     use super::date_stamp;
 
-    /// 日期换算是手写的 Howard Hinnant civil_from_days。写错不只是文件名难看：
-    /// 按名字排序裁剪旧文件时会误删当天的日志，所以拿已知时间点钉住。
+    /// 文件名写错不只是难看：按名字排序裁剪旧文件时会误删当天的日志，所以拿已知时间点钉住。
     #[test]
     fn date_stamp_matches_known_utc_dates() {
         for (secs, want) in [

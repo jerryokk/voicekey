@@ -1,12 +1,12 @@
-<script lang="ts">
-  let { value = "", options = [] as { v: string; label: string }[], onchange }: {
-    value?: string; options?: { v: string; label: string }[]; onchange?: (v: string) => void;
+<script lang="ts" generics="T extends string">
+  let { value, options, label = "", onchange }: {
+    value: T; options: { v: T; label: string }[]; label?: string; onchange?: (v: T) => void;
   } = $props();
 </script>
 
-<div class="seg">
+<div class="seg" role="radiogroup" aria-label={label}>
   {#each options as o}
-    <button class:on={value === o.v} onclick={() => onchange?.(o.v)}>{o.label}</button>
+    <button role="radio" aria-checked={value === o.v} class:on={value === o.v} onclick={() => onchange?.(o.v)}>{o.label}</button>
   {/each}
 </div>
 

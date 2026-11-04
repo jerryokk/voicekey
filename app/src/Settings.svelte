@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { app, init } from "./lib/store.svelte";
+  import { app, init, link } from "./lib/store.svelte";
+  import { GEAR } from "./lib/icons";
   import Logo from "./lib/Logo.svelte";
   import StatusDot from "./lib/ui/StatusDot.svelte";
   import Connect from "./pages/Connect.svelte";
@@ -11,18 +12,13 @@
   const PAGES = [
     { id: "connect", name: "连接", icon: '<rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M10.5 18.5h3"/>' },
     { id: "channels", name: "渠道", icon: '<path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zM5 11a7 7 0 0 0 14 0M12 18v3"/>' },
-    { id: "settings", name: "设置", icon: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>' },
+    { id: "settings", name: "设置", icon: GEAR },
   ];
 
   let page = $state("connect");
   const win = getCurrentWindow();
 
-  const status = $derived.by(() => {
-    const r = app.remote;
-    if (r.state === "failed" || r.lanOnly) return { dot: "err" as const, text: "隧道未建立" };
-    if (r.qr) return { dot: "ok" as const, text: "可连接" };
-    return { dot: "busy" as const, text: "启动中" };
-  });
+  const status = $derived(link(app.remote));
 
   onMount(() => {
     init();
@@ -67,6 +63,7 @@
 
     <main>
       <div class="drag" data-tauri-drag-region></div>
+      {#if app.error}<p class="alert" role="alert">{app.error}</p>{/if}
       {#if page === "connect"}<Connect />
       {:else if page === "channels"}<Channels />
       {:else}<Preferences />{/if}
@@ -123,4 +120,10 @@
   .wctl svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; }
 
   main { flex: 1; min-width: 0; overflow: auto; padding: 0 24px 24px; }
+  main :global(.card) { margin-bottom: 12px; }
+  .alert {
+    margin-bottom: 12px; padding: 7px 12px; border-radius: var(--r-sm);
+    font-size: var(--fs-sub); color: var(--err); background: var(--err-soft);
+    user-select: text; -webkit-user-select: text;
+  }
 </style>

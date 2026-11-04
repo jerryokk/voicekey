@@ -1,5 +1,6 @@
 <script lang="ts">
-  let { label = "", desc = "", children } = $props();
+  import type { Snippet } from "svelte";
+  let { label, desc = "", children }: { label: string; desc?: string; children?: Snippet } = $props();
 </script>
 
 <div class="row">

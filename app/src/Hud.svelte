@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { call, on, applyLook, type AppInfo, type Channel } from "./lib/api";
+  import { on, applyTheme, type Channel } from "./lib/api";
   import ChIcon from "./lib/ChIcon.svelte";
 
   let st = $state<{ state: string; text: string; channel: Channel }>({ state: "hidden", text: "", channel: "doubao" });
 
   onMount(() => {
-    call<AppInfo>("get_state").then((i) => applyLook(i.platform, "dark"));
+    // 胶囊永远是深色：它浮在任意窗口上，深底白字在浅色和深色背景上都读得清
+    applyTheme("dark");
     const un = [
       on<{ state: string; text?: string; channel?: Channel }>("hud", (p) => (st = { ...st, text: "", ...p })),
     ];
@@ -47,7 +48,6 @@
     box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35), inset 0 0 0 1px rgba(255, 120, 90, 0.28);
   }
   .rec { width: 9px; height: 9px; border-radius: 50%; background: #d9552b; flex: none; animation: pulse 1s ease-in-out infinite; }
-  @keyframes pulse { 50% { opacity: 0.35; } }
   .live { min-width: 0; max-width: 460px; white-space: nowrap; overflow: hidden; direction: rtl; text-align: left; font-size: 14px; }
   .live span { direction: ltr; unicode-bidi: plaintext; }
   .hint { font-size: 13px; opacity: 0.7; }

@@ -1,27 +1,27 @@
 use crate::pb::{self, PBuf};
-use crate::audio;
-use crate::util::{data_file, join_sentences, now_ms};
+use crate::util::{now_ms, IdFile};
 use crate::ws::{self, AbortOnDrop};
-use crate::{opus, Audio, Engine, Partial};
-use anyhow::{anyhow, bail, Result};
-use futures_util::{SinkExt, StreamExt};
+use crate::{audio, opus, Audio, Engine, Partial};
+use anyhow::{anyhow, bail, Context, Result};
+use futures_util::{SinkExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio_tungstenite::tungstenite::Message;
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::{self, Message};
 
 const WS_URL: &str = "wss://frontier-audio-ime-ws.doubao.com/ocean/api/v1/ws";
 const OK: i64 = 20_000_000;
-/// 官方客户端内置 ASR app key（1.4.6 IAsr.b()）；settings 下发的 app_key 已被部分设备拒绝（service discovery failure）
+/// 官方客户端内置的 ASR app key（1.4.6 IAsr.b()）
 const APP_KEY: &str = "OrnqKvSSrs";
+/// TaskRequest 的帧序：首帧、中间帧、结束帧
 const FIRST: u64 = 1;
 const MIDDLE: u64 = 3;
 const LAST: u64 = 9;
+const ID: IdFile = IdFile("doubao.json");
 
 /// 豆包输入法流式识别：asr.AsrRequest protobuf over WSS，Opus 20ms 帧
-#[derive(Default)]
 pub struct DoubaoEngine;
 
 fn request(token: &str, method: &str, payload: &str, audio: &[u8], rid: &str, frame: u64) -> Message {
@@ -40,9 +40,10 @@ fn request(token: &str, method: &str, payload: &str, audio: &[u8], rid: &str, fr
     if frame != 0 {
         pb = pb.v(9, frame);
     }
-    Message::Binary(pb.0)
+    Message::Binary(pb.0.into())
 }
 
+/// asr.AsrResponse；proto3 省略默认值，缺字段即零值
 struct Response {
     event: String,
     status: i64,
@@ -55,112 +56,102 @@ impl Response {
         let f = pb::parse(data)?;
         Ok(Self {
             event: f.string(4).unwrap_or_default(),
+            // int32 负值按 64 位补码编码
             status: f.varint(5).unwrap_or(0) as i32 as i64,
             message: f.string(6).unwrap_or_default(),
             result: f.string(7).unwrap_or_default(),
         })
     }
-    fn failed(&self) -> anyhow::Error {
+
+    /// TaskFailed / SessionFailed 等：服务端拒绝本次会话
+    fn failed(&self) -> bool {
+        self.event.ends_with("Failed")
+    }
+
+    fn error(&self) -> anyhow::Error {
         anyhow!("豆包 {} {}: {}", self.event, self.status, self.message)
     }
 }
 
-/// 上游按句定稿（index 递增，同一句可能再次定稿按 index 覆盖）；展示 = 已定稿句 + 当前句
-#[derive(Default)]
-struct Transcript {
-    sentences: BTreeMap<i64, String>,
-    current: String,
-    next_index: i64,
+/// results[0].text 是整段累计文本（其余为辅助候选）；results 为 null 的是心跳
+fn result_text(json: &str) -> Result<Option<String>> {
+    let v: Value = serde_json::from_str(json).context("豆包结果解析失败")?;
+    let Some(first) = v["results"].as_array().and_then(|r| r.first()) else { return Ok(None) };
+    Ok(Some(first["text"].as_str().context("豆包结果缺少 text")?.to_string()))
 }
 
-impl Transcript {
-    fn result(&self) -> String {
-        let mut parts: Vec<&String> = self.sentences.values().collect();
-        if !self.current.is_empty() {
-            parts.push(&self.current);
-        }
-        join_sentences(&parts)
+/// 录音分流：边转发给当前会话边留底；换设备重试时先灌入留底，后续音频继续转给新会话。
+/// 录音结束后 out 为 None，新会话的音频流读完留底即关闭
+struct Tee {
+    kept: Vec<Vec<i16>>,
+    out: Option<mpsc::UnboundedSender<Vec<i16>>>,
+}
+
+impl Tee {
+    fn spawn(mut audio: Audio) -> (Arc<Mutex<Tee>>, Audio, AbortOnDrop<()>) {
+        let (out, rx) = mpsc::unbounded_channel();
+        let tee = Arc::new(Mutex::new(Tee { kept: Vec::new(), out: Some(out) }));
+        let t = tee.clone();
+        let task = AbortOnDrop(tokio::spawn(async move {
+            while let Some(f) = audio.recv().await {
+                let mut t = t.lock().unwrap();
+                if let Some(out) = &t.out {
+                    // 会话已失败时接收端已丢弃，只留底
+                    let _ = out.send(f.clone());
+                }
+                t.kept.push(f);
+            }
+            t.lock().unwrap().out = None;
+        }));
+        (tee, rx, task)
     }
 
-    fn update(&mut self, json: &str) -> Option<String> {
-        let v: Value = serde_json::from_str(json).ok()?;
-        let results = v.get("results")?.as_array()?;
-        // 新后端：results[0] 为整段累计文本，其余为辅助候选（无 index）
-        if !results.iter().any(|r| r.get("index").is_some()) {
-            let text = results.first()?["text"].as_str().filter(|t| !t.is_empty())?;
-            self.sentences.clear();
-            self.current = text.to_string();
-            return Some(self.current.clone());
+    fn restart(&mut self) -> Audio {
+        let (out, rx) = mpsc::unbounded_channel();
+        for f in &self.kept {
+            out.send(f.clone()).expect("接收端就在本函数里");
         }
-        for r in results {
-            let Some(t) = r["text"].as_str().filter(|t| !t.is_empty()) else { continue };
-            let fin = r["extra"]["nonstream_result"].as_bool().unwrap_or(false)
-                || (r["is_interim"].as_bool() == Some(false) && r["is_vad_finished"].as_bool() == Some(true));
-            if fin {
-                let idx = r["index"].as_i64().unwrap_or(self.next_index);
-                self.sentences.insert(idx, t.to_string());
-                self.next_index = self.next_index.max(idx + 1);
-                self.current.clear();
-            } else {
-                self.current = t.to_string();
-            }
+        if self.out.is_some() {
+            self.out = Some(out);
         }
-        let mut parts: Vec<&String> = self.sentences.values().collect();
-        parts.push(&self.current);
-        Some(join_sentences(&parts))
+        rx
     }
 }
 
 #[async_trait::async_trait]
 impl Engine for DoubaoEngine {
-    async fn run(&self, mut audio: Audio, partial: Partial) -> Result<String> {
-        // 录音同时留底：服务端拒绝当前设备（SessionFailed 且无结果）时换新设备重放一次
-        let (ftx, frx) = tokio::sync::mpsc::unbounded_channel();
-        let kept = Arc::new(Mutex::new(Vec::new()));
-        let k = kept.clone();
-        let _tee = AbortOnDrop(tokio::spawn(async move {
-            while let Some(f) = audio.recv().await {
-                k.lock().unwrap().push(f.clone());
-                let _ = ftx.send(f);
-            }
-        }));
+    async fn run(&self, audio: Audio, partial: Partial) -> Result<String> {
+        let (tee, first, _task) = Tee::spawn(audio);
         let partial: Arc<Partial> = Arc::new(partial);
-        match session(frx, partial.clone()).await {
+        match session(first, partial.clone()).await {
+            Ok(t) => Ok(t),
+            Err(Fail::Other(e)) => Err(e),
+            // 设备被服务端拒绝（如 service discovery failure）：换新设备，录音从头重放
             Err(Fail::Rejected(e)) => {
-                DoubaoDevice::reset();
-                let (rtx, rrx) = tokio::sync::mpsc::unbounded_channel();
-                let frames = std::mem::take(&mut *kept.lock().unwrap());
-                // 4 倍速回放，一次性灌入会被服务端拒绝
-                let _replay = AbortOnDrop(tokio::spawn(async move {
-                    for f in frames {
-                        if rtx.send(f).is_err() {
-                            break;
+                ID.remove()?;
+                let replay = tee.lock().unwrap().restart();
+                session(replay, partial).await.map_err(|r| {
+                    let r = match r {
+                        Fail::Rejected(r) => {
+                            // 新设备同样被拒，不留着它
+                            let _ = ID.remove();
+                            r
                         }
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                    }
-                }));
-                session(rrx, partial).await.map_err(|r| {
-                    DoubaoDevice::reset();
-                    anyhow!("{e}；换设备重试：{}", r.into_inner())
+                        Fail::Other(r) => r,
+                    };
+                    anyhow!("{e}；换设备重试：{r:#}")
                 })
             }
-            r => r.map_err(Fail::into_inner),
         }
     }
 }
 
-/// Rejected：服务端判会话失败且无任何结果，可换设备重试
+/// Rejected：尚未出字时服务端判会话失败，换设备可能恢复
 enum Fail {
     Other(anyhow::Error),
     Rejected(anyhow::Error),
 }
-impl Fail {
-    fn into_inner(self) -> anyhow::Error {
-        match self {
-            Fail::Other(e) | Fail::Rejected(e) => e,
-        }
-    }
-}
+
 impl<E: Into<anyhow::Error>> From<E> for Fail {
     fn from(e: E) -> Self {
         Fail::Other(e.into())
@@ -168,93 +159,75 @@ impl<E: Into<anyhow::Error>> From<E> for Fail {
 }
 
 async fn session(audio: Audio, partial: Arc<Partial>) -> std::result::Result<String, Fail> {
-    {
-        let mut audio = audio::lead(audio);
-        let device = DoubaoDevice::load().await?;
-        let rid = uuid::Uuid::new_v4().to_string();
-        let url = format!("{WS_URL}?aid=401734&device_id={}", device.did);
-        let ua = device.phone.ua();
-        let ws = ws::connect(&url, &[("User-Agent", &ua), ("proto-version", "v2"), ("x-custom-keepalive", "true")]).await?;
-        let (mut tx, mut rx) = ws.split();
+    let mut audio = audio::lead(audio);
+    let device = DoubaoDevice::load().await?;
+    let rid = uuid::Uuid::new_v4().to_string();
+    let url = format!("{WS_URL}?aid=401734&device_id={}", device.did);
+    let ua = device.phone.ua();
+    let ws = ws::connect(&url, &[("User-Agent", &ua), ("proto-version", "v2"), ("x-custom-keepalive", "true")]).await?;
+    let (mut tx, mut rx) = ws.split();
 
-        let session = json!({
-            "audio_info": {"channel": 1, "format": "speech_opus", "sample_rate": 16000},
-            "enable_punctuation": true,
-            "enable_speech_rejection": true,
-            "extra": {"app_name": "oime", "cell_compress_rate": 8, "did": device.did,
-                      "enable_asr_threepass": false, "enable_asr_twopass": true, "input_mode": "stream"},
-        })
-        .to_string();
-        let handshake = async {
-            tx.send(request(APP_KEY, "StartTask", "", &[], &rid, 0)).await?;
-            expect(&mut rx, "TaskStarted").await?;
-            tx.send(request(APP_KEY, "StartSession", &session, &[], &rid, 0)).await?;
-            expect(&mut rx, "SessionStarted").await
-        };
-        if let Err(e) = handshake.await {
-            DoubaoDevice::reset();
-            return Err(e.into());
-        }
+    let session = json!({
+        "audio_info": {"channel": 1, "format": "speech_opus", "sample_rate": 16000},
+        "enable_punctuation": true,
+        "enable_speech_rejection": true,
+        "extra": {"app_name": "oime", "cell_compress_rate": 8, "did": device.did,
+                  "enable_asr_threepass": false, "enable_asr_twopass": true, "input_mode": "stream"},
+    })
+    .to_string();
+    tx.send(request(APP_KEY, "StartTask", "", &[], &rid, 0)).await?;
+    expect(&mut rx, "TaskStarted").await?;
+    tx.send(request(APP_KEY, "StartSession", &session, &[], &rid, 0)).await?;
+    expect(&mut rx, "SessionStarted").await?;
 
-        let transcript = Arc::new(Mutex::new(Transcript::default()));
-        let t = transcript.clone();
-        let receiver = AbortOnDrop(tokio::spawn(async move {
-            loop {
-                // 静音期间上游不回包，超时只兜底；结束阶段由外层限时
-                let r = Response::parse(&ws::recv(&mut rx, Duration::from_secs(600)).await?)?;
-                if !r.result.is_empty() {
-                    let text = t.lock().unwrap().update(&r.result);
-                    if let Some(text) = text {
+    let mut receiver = AbortOnDrop(tokio::spawn(async move {
+        let mut text = String::new();
+        loop {
+            // 服务端约每秒一个心跳包，静音期间也不会长时间无包；结束阶段由外层限时
+            let r = Response::parse(&ws::recv(&mut rx, Duration::from_secs(30)).await?)?;
+            if r.failed() {
+                return Err(if text.is_empty() { Fail::Rejected(r.error()) } else { Fail::Other(r.error()) });
+            }
+            if !r.result.is_empty() {
+                if let Some(t) = result_text(&r.result)? {
+                    if t != text {
+                        text = t;
                         partial(&text);
                     }
                 }
-                if r.event.ends_with("Failed") {
-                    return Err(r.failed());
-                }
-                if r.event == "SessionFinished" {
-                    return Ok(());
-                }
             }
-        }));
-
-        let mut enc = opus::Opus::new(opus::VOIP, 16000, 5)?;
-        let ts0 = now_ms();
-        let meta = |i: u64| format!(r#"{{"extra":{{}},"timestamp_ms":{}}}"#, ts0 + i * 20);
-        let mut index = 0u64;
-        while let Some(frame) = audio.recv().await {
-            let pkt = enc.encode(&frame)?;
-            let kind = if index == 0 { FIRST } else { MIDDLE };
-            tx.send(request("", "TaskRequest", &meta(index), &pkt, &rid, kind)).await?;
-            index += 1;
+            if r.event == "SessionFinished" {
+                return Ok(text);
+            }
         }
-        tx.send(request("", "TaskRequest", &meta(index), &[], &rid, LAST)).await?;
-        tx.send(request(APP_KEY, "FinishSession", "", &[], &rid, 0)).await?;
+    }));
 
-        let limit = Duration::from_secs_f64(10.0 + index as f64 / 200.0);
-        let mut receiver = receiver;
-        let outcome = match tokio::time::timeout(limit, &mut receiver).await {
-            Ok(r) => r.map_err(|e| anyhow!("{e}")).and_then(|r| r),
-            Err(_) => Err(anyhow!("豆包定稿超时")),
-        };
-        let _ = tx.close().await;
-        let text = transcript.lock().unwrap().result();
-        match outcome {
-            // 如设备被服务端拉黑后的 service discovery failure
-            Err(e) if text.is_empty() && e.to_string().contains("Failed") => Err(Fail::Rejected(e)),
-            Err(e) if text.is_empty() => Err(e.into()),
-            _ => Ok(text),
-        }
+    let mut enc = opus::Opus::new(opus::VOIP, 16000, 5)?;
+    let ts0 = now_ms();
+    let meta = |i: u64| format!(r#"{{"extra":{{}},"timestamp_ms":{}}}"#, ts0 + i * 20);
+    let mut index = 0u64;
+    while let Some(frame) = audio.recv().await {
+        let pkt = enc.encode(&frame)?;
+        let kind = if index == 0 { FIRST } else { MIDDLE };
+        tx.send(request("", "TaskRequest", &meta(index), &pkt, &rid, kind)).await?;
+        index += 1;
     }
+    tx.send(request("", "TaskRequest", &meta(index), &[], &rid, LAST)).await?;
+    tx.send(request(APP_KEY, "FinishSession", "", &[], &rid, 0)).await?;
+
+    let limit = Duration::from_secs_f64(10.0 + index as f64 / 200.0);
+    tokio::time::timeout(limit, &mut receiver).await.map_err(|_| anyhow!("豆包定稿超时"))??
 }
 
-async fn expect<S>(rx: &mut S, event: &str) -> Result<()>
+/// 握手阶段等待指定事件；此时被拒都算设备问题
+async fn expect<S>(rx: &mut S, event: &str) -> std::result::Result<(), Fail>
 where
-    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+    S: Stream<Item = Result<Message, tungstenite::Error>> + Unpin,
 {
     loop {
         let r = Response::parse(&ws::recv(rx, Duration::from_secs(10)).await?)?;
-        if r.event.ends_with("Failed") || (r.event == event && r.status != OK) {
-            return Err(r.failed());
+        if r.failed() || (r.event == event && r.status != OK) {
+            return Err(Fail::Rejected(r.error()));
         }
         if r.event == event {
             return Ok(());
@@ -262,12 +235,10 @@ where
     }
 }
 
-/// 设备注册 + settings 拉取 asr app_key，本地缓存复用
-#[derive(Serialize, Deserialize, Clone)]
+/// 注册得到的设备 id 与随机选定的机型，一起缓存复用
+#[derive(Serialize, Deserialize)]
 struct DoubaoDevice {
     did: String,
-    /// 注册时随机，随 did 固定；旧缓存缺省为原来的 Pixel 7 Pro
-    #[serde(default)]
     phone: Phone,
 }
 
@@ -298,7 +269,7 @@ const PHONES: &[[&str; 7]] = &[
     ["OnePlus", "PJE110", "14", "34", "UKQ1.230924.001", "1264*2780", "480"],
 ];
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize)]
 struct Phone {
     brand: String,
     model: String,
@@ -309,20 +280,10 @@ struct Phone {
     dpi: String,
 }
 
-impl Default for Phone {
-    fn default() -> Self {
-        Self::from(&PHONES[0])
-    }
-}
-
 impl Phone {
-    fn from(p: &[&str; 7]) -> Self {
-        let [brand, model, os, api, build, resolution, dpi] = p.map(String::from);
-        Self { brand, model, os, api, build, resolution, dpi }
-    }
-
     fn random() -> Self {
-        Self::from(&PHONES[rand::random::<usize>() % PHONES.len()])
+        let [brand, model, os, api, build, resolution, dpi] = PHONES[rand::random::<usize>() % PHONES.len()].map(String::from);
+        Self { brand, model, os, api, build, resolution, dpi }
     }
 
     fn ua(&self) -> String {
@@ -346,48 +307,21 @@ impl Phone {
 }
 
 impl DoubaoDevice {
-    fn file() -> std::path::PathBuf {
-        data_file("doubao.json")
-    }
-
     async fn load() -> Result<Self> {
-        if let Some(d) = std::fs::read(Self::file()).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+        if let Some(d) = ID.load() {
             return Ok(d);
         }
         let d = Self::register().await?;
-        let _ = std::fs::write(Self::file(), serde_json::to_vec(&d)?);
+        ID.save(&d)?;
         Ok(d)
-    }
-
-    fn reset() {
-        let _ = std::fs::remove_file(Self::file());
-    }
-
-    async fn post(url: &str, ua: &str, query: &[(&str, String)], body: Vec<u8>, ctype: &str) -> Result<Value> {
-        let resp = reqwest::Client::new()
-            .post(url)
-            .query(query)
-            .timeout(Duration::from_secs(10))
-            .header("User-Agent", ua)
-            .header("Content-Type", ctype)
-            .body(body)
-            .send()
-            .await?;
-        if resp.status() != 200 {
-            bail!("豆包设备注册 HTTP 失败");
-        }
-        Ok(resp.json().await.unwrap_or(Value::Null))
     }
 
     async fn register() -> Result<Self> {
         let phone = Phone::random();
         let cdid = uuid::Uuid::new_v4().to_string();
-        let now = now_ms().to_string();
+        let now = now_ms();
         let mut q = phone.params();
-        let mut header = serde_json::Map::new();
-        for (k, v) in &q {
-            header.insert(k.to_string(), json!(v));
-        }
+        let mut header: serde_json::Map<String, Value> = q.iter().map(|(k, v)| (k.to_string(), json!(v))).collect();
         let extra = json!({
             "device_id": 0, "install_id": 0, "cdid": cdid,
             "openudid": format!("{:016x}", rand::random::<u64>()),
@@ -396,38 +330,65 @@ impl DoubaoDevice {
             "sim_region": "cn", "carrier_region": "cn", "cpu_abi": "arm64-v8a", "build_serial": "unknown",
             "not_request_sender": 0, "sig_hash": "", "google_aid": "", "mc": "", "serial_number": "",
         });
-        header.extend(extra.as_object().unwrap().clone());
-        let body = json!({"magic_tag": "ss_app_log", "header": header, "_gen_time": now.parse::<u64>()?});
+        let Value::Object(extra) = extra else { unreachable!() };
+        header.extend(extra);
+        let body = json!({"magic_tag": "ss_app_log", "header": header, "_gen_time": now});
 
-        q.extend([("ssmix", "a".into()), ("_rticket", now.clone()), ("cdid", cdid.clone()), ("ac", "wifi".into())]);
-        let reg = Self::post("https://log-klink.zijieapi.com/service/2/device_register/", &phone.ua(), &q, serde_json::to_vec(&body)?, "application/json").await?;
-        let did = reg["device_id_str"]
-            .as_str()
-            .map(String::from)
-            .or_else(|| reg["device_id"].as_u64().map(|n| n.to_string()))
-            .unwrap_or_default();
+        q.extend([("ssmix", "a".into()), ("_rticket", now.to_string()), ("cdid", cdid), ("ac", "wifi".into())]);
+        let reg: Value = reqwest::Client::new()
+            .post("https://log-klink.zijieapi.com/service/2/device_register/")
+            .query(&q)
+            .timeout(Duration::from_secs(10))
+            .header("User-Agent", phone.ua())
+            .json(&body)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .context("豆包设备注册失败")?
+            .json()
+            .await
+            .context("豆包设备注册响应解析失败")?;
+        let did = reg["device_id_str"].as_str().context("豆包设备注册响应缺少 device_id_str")?;
         if did.is_empty() || did == "0" {
             bail!("豆包设备注册被拒绝");
         }
-
-        Ok(Self { did, phone })
+        Ok(Self { did: did.to_string(), phone })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Transcript;
+    use super::*;
 
     #[test]
-    fn result_keeps_unfinished_sentence() {
-        let mut t = Transcript::default();
-        let shown = t.update(
-            r#"{"results":[
-                {"text":"第一句","index":0,"is_interim":false,"is_vad_finished":true},
-                {"text":"还没定稿","index":1,"is_interim":true}
-            ]}"#,
-        );
-        assert_eq!(shown.as_deref(), Some("第一句还没定稿"));
-        assert_eq!(t.result(), "第一句还没定稿");
+    fn result_text_takes_cumulative_first() {
+        let r = result_text(r#"{"results":[{"text":"不错，我们"},{"text":"不错我们"}]}"#).unwrap();
+        assert_eq!(r.as_deref(), Some("不错，我们"));
+    }
+
+    #[test]
+    fn heartbeat_has_no_text() {
+        assert_eq!(result_text(r#"{"results":null,"extra":{"heartbeat_num":3}}"#).unwrap(), None);
+    }
+
+    #[test]
+    fn malformed_result_is_error() {
+        assert!(result_text("{").is_err());
+        assert!(result_text(r#"{"results":[{}]}"#).is_err());
+    }
+
+    #[tokio::test]
+    async fn tee_replays_kept_and_closes_after_source_ends() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (tee, mut first, _task) = Tee::spawn(rx);
+        tx.send(vec![1]).unwrap();
+        assert_eq!(first.recv().await, Some(vec![1]));
+        drop(first);
+        let mut replay = tee.lock().unwrap().restart();
+        tx.send(vec![2]).unwrap();
+        drop(tx);
+        assert_eq!(replay.recv().await, Some(vec![1]));
+        assert_eq!(replay.recv().await, Some(vec![2]));
+        assert_eq!(replay.recv().await, None);
     }
 }

@@ -1,5 +1,5 @@
 use crate::pb::{self, PBuf};
-use crate::util::{data_file, now_ms, rand_lower};
+use crate::util::{now_ms, rand_lower, IdFile};
 use crate::ws::{self, Ws};
 use crate::{opus, Audio, Engine, Partial};
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyInit};
@@ -25,6 +25,7 @@ const CMD_DH: u64 = 2_147_483_646;
 const CMD_UIN: u64 = 0x7FFF_FDFD;
 const CMD_NOTIFY: u64 = 8074;
 const CMD_VOICE: u64 = 4548;
+const ID: IdFile = IdFile("wetype.json");
 
 /// 微信输入法云端识别（伪装 Mac 客户端）：protobuf 包 HTTP over WSS + snappy + AES-256-ECB + secp128r1 ECDH
 #[derive(Default)]
@@ -177,8 +178,7 @@ impl Client {
 
     async fn handshake(&mut self) -> Result<()> {
         self.roundtrip("/timestamp", vec![], 0, "1", "").await?;
-        let file = data_file("wetype.json");
-        let saved: Option<Identity> = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        let saved: Option<Identity> = ID.load();
         if let Some(s) = &saved {
             self.device = s.device.clone();
             self.uin = s.uin.clone();
@@ -190,7 +190,7 @@ impl Client {
         }
         if saved.as_ref().is_none_or(|s| s.device != self.device || s.uin != self.uin) {
             let id = Identity { device: self.device.clone(), uin: self.uin.clone() };
-            let _ = std::fs::write(&file, serde_json::to_vec(&id)?);
+            ID.save(&id)?;
         }
         let body = aes_enc(self.key()?, &[]);
         self.roundtrip("/api_v2", body, CMD_NOTIFY, "1", "").await?;
@@ -209,7 +209,7 @@ impl Client {
         }
         req = req.s(4, &self.device);
         if !need_uin {
-            req = req.v(5, self.uin.parse().unwrap_or(0));
+            req = req.v(5, self.uin.parse().map_err(|_| anyhow!("微信 UIN 无效：{}", self.uin))?);
         }
         req = req.s(7, "").s(8, DEVICE_MODEL).s(9, "");
         let body = self.request("/oauth_pubkey_v2", aes_enc(BOOT_KEY, &req.0), CMD_DH, "").await?;
@@ -259,11 +259,11 @@ impl Client {
             bail!("微信语音请求失败 {}", r.status);
         }
         let mut plain = aes_dec(self.key()?, &r.body)?;
-        if r.headers.get("Kb-CompressionType").or(r.headers.get("CompressionType")).map(String::as_str) == Some("2") {
+        if r.headers.get("Kb-CompressionType").map(String::as_str) == Some("2") {
             plain = snappy::decompress(&plain)?;
         }
         let top = pb::parse(&plain)?;
-        let f = pb::parse(top.bytes(1).unwrap_or(&plain))?;
+        let f = pb::parse(top.bytes(1).ok_or_else(|| anyhow!("微信语音响应缺少结果"))?)?;
         Ok((f.string(4).unwrap_or_default(), f.string(14).unwrap_or_default()))
     }
 
@@ -333,7 +333,7 @@ impl Client {
         }
         http = http.b(6, &body);
         let frame = PBuf::new().v(1, 0).v(2, 0).v(3, task_id).m(5, http);
-        self.ws.send(Message::Binary(frame.0)).await?;
+        self.ws.send(Message::Binary(frame.0.into())).await?;
 
         let raw = ws::recv(&mut self.ws, Duration::from_secs(15)).await?;
         let fields = match pb::parse(&raw)?.bytes(4) {

@@ -14,10 +14,10 @@ body {
 body.transparent { background: transparent; }
 button, input, select { font: inherit; color: inherit; }
 h1 { font-size: var(--fs-title); font-weight: 500; }
-h2 { font-size: 15px; font-weight: 500; }
 h3 { font-size: var(--fs-sub); font-weight: 500; color: var(--fg-3); letter-spacing: 0.02em; }
-a { color: var(--accent); }
-code, kbd { font-family: var(--mono); }
+code { font-family: var(--mono); }
+/* 设置窗各页标题下的一句说明 */
+.sub { margin: 4px 0 16px; color: var(--fg-2); }
 
 /* 滚动条：平时隐形，悬停到所在区域才浮现细条，不跟内容抢宽度。
    标准属性走新内核，::-webkit 那组兜底旧内核。 */
@@ -46,16 +46,6 @@ code, kbd { font-family: var(--mono); }
 .btn.danger { color: var(--err); border-color: color-mix(in srgb, var(--err) 35%, transparent); }
 .btn.danger:hover { background: var(--err-soft); }
 
-/* 只读信息条 */
-.note {
-  display: flex; gap: 8px; align-items: flex-start;
-  font-size: var(--fs-sub); color: var(--fg-2); line-height: 1.7;
-  background: var(--card-2); border: 1px solid var(--line);
-  border-radius: var(--r-md); padding: 10px 12px;
-}
-
-.ok { color: var(--ok); }
-.err { color: var(--err); }
 .muted { color: var(--fg-3); }
 .spin {
   width: 12px; height: 12px; flex: none; border-radius: 50%;
@@ -64,5 +54,3 @@ code, kbd { font-family: var(--mono); }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { 50% { opacity: .35; } }
-@keyframes shake { 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
-@keyframes blink { 50% { opacity: 0; } }

@@ -1,7 +1,7 @@
 use crate::ws::{self, Ws};
 use crate::{Audio, Engine, Partial};
 use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
@@ -11,6 +11,7 @@ use rsa::{Oaep, RsaPublicKey};
 use serde_json::{json, Value};
 use sha2::Sha256;
 use std::time::Duration;
+use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 
 const HOST: &str = "srss.speech.sogou.com";
@@ -22,20 +23,16 @@ const PRODUCT_VERSION: &str = "1.0.9.13509";
 const PUBKEY: &[u8] = include_bytes!("chatterfly_pub.der");
 
 /// Chatterfly（元宝输入法）云端流式识别：wss + 加密 config 首帧 + 裸 PCM 二进制帧
-#[derive(Default)]
 pub struct ChatterflyEngine;
 
+/// 空闲超时：服务端每次出字即刷新，长语音不会因为总时长被截断
+const IDLE: Duration = Duration::from_secs(30);
+
 fn hex32() -> String {
-    let mut b = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut b);
-    hex::encode(b)
+    uuid::Uuid::new_v4().simple().to_string()
 }
 
-fn language() -> String {
-    std::env::var("CHATTERFLY_LANG").unwrap_or_else(|_| "zh-cmn-Hans-CN".to_string())
-}
-
-fn config(token: &str) -> Value {
+fn config() -> Value {
     // audio_id / audio_slice_id 必须是 32 位 hex，否则服务端回 invalid audio info
     let dev = json!({
         "device_category": "mac",
@@ -43,10 +40,10 @@ fn config(token: &str) -> Value {
         "device_aid": hex32(),
         "device_qid": hex32(),
     });
-    let mut cfg = json!({
+    json!({
         "config": {
             "encoding": "LINEAR16",
-            "language_code": language(),
+            "language_code": "zh-cmn-Hans-CN",
             "model": "default",
             "punctuation_mode": "NORMAL_PUNCTUATION",
             "convert_number": true,
@@ -74,11 +71,7 @@ fn config(token: &str) -> Value {
         },
         "interim_results": true,
         "single_utterance": true,
-    });
-    if !token.is_empty() {
-        cfg["config"]["auth_token"] = json!(token);
-    }
-    cfg
+    })
 }
 
 struct Sealed {
@@ -112,62 +105,50 @@ fn transcript(v: &Value) -> String {
 }
 
 fn is_final(v: &Value) -> bool {
-    v["results"]
-        .as_array()
-        .map(|rs| rs.iter().any(|r| r["is_final"].as_bool().unwrap_or(false)))
-        .unwrap_or(false)
+    v["results"].as_array().is_some_and(|rs| rs.iter().any(|r| r["is_final"] == true))
 }
 
-fn server_error(v: &Value) -> Option<String> {
+/// 服务端判定这句话已结束（无语音时随后直接关连接，不给 is_final）
+fn utterance_ended(v: &Value) -> bool {
+    v["events"].as_array().is_some_and(|es| es.iter().any(|e| e["event_type"] == "END_OF_SINGLE_UTTERANCE"))
+}
+
+fn server_error(v: &Value) -> Option<anyhow::Error> {
     let e = &v["error"];
     if e.is_null() {
         return None;
     }
-    let code = e["code"].as_i64().unwrap_or(-1);
-    let msg = e["message"].as_str().unwrap_or("识别失败");
-    Some(format!("Chatterfly {msg}（{code}）"))
+    Some(anyhow!("Chatterfly {}（{}）", e["message"].as_str().unwrap_or("识别失败"), e["code"]))
 }
 
-async fn open(token: &str) -> Result<(Ws, String)> {
-    let cfg = config(token);
-    let sealed = seal(serde_json::to_vec(&cfg)?.as_slice())?;
-    let url = format!("wss://{HOST}{PATH}");
-    let mut headers = vec![
+async fn open() -> Result<(Ws, String)> {
+    let sealed = seal(&serde_json::to_vec(&config())?)?;
+    let headers = [
         ("X-Srss-Cipher-Key-Type", "1"),
         ("X-Srss-Cipher-Key-Sec", sealed.sec.as_str()),
         ("X-Srss-Cipher-Key-Vec", sealed.vec.as_str()),
     ];
-    let auth;
-    if !token.is_empty() {
-        auth = format!("Bearer {token}");
-        headers.push(("Authorization", auth.as_str()));
-    }
-    let ws = ws::connect(&url, &headers).await?;
+    let ws = ws::connect(&format!("wss://{HOST}{PATH}"), &headers).await?;
     Ok((ws, sealed.body))
 }
 
 #[async_trait::async_trait]
 impl Engine for ChatterflyEngine {
     async fn run(&self, mut audio: Audio, partial: Partial) -> Result<String> {
-        let token = std::env::var("CHATTERFLY_TOKEN").unwrap_or_default();
-        let (ws, body) = open(&token).await?;
+        let (ws, body) = open().await?;
         let (mut sink, mut stream) = ws.split();
-        sink.send(Message::Text(body)).await?;
+        sink.send(Message::Text(body.into())).await?;
 
         let mut text = String::new();
-        let mut sent = 0usize;
         let mut closed = false;
-        // 空闲超时：服务端每次出字即刷新，长语音不会因为总时长被截断
-        let mut deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-
+        let mut ended = false;
+        let mut deadline = Instant::now() + IDLE;
         loop {
             tokio::select! {
                 biased;
                 frame = audio.recv(), if !closed => match frame {
                     Some(pcm) => {
-                        let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
-                        sent += pcm.len();
-                        sink.send(Message::Binary(bytes)).await?;
+                        sink.send(Message::Binary(pcm.iter().flat_map(|s| s.to_le_bytes()).collect::<Vec<_>>().into())).await?;
                     }
                     None => {
                         closed = true;
@@ -179,14 +160,20 @@ impl Engine for ChatterflyEngine {
                     let chunk = match ws::data(msg) {
                         Ok(Some(d)) => d,
                         Ok(None) => continue,
-                        Err(e) => {
-                            if text.is_empty() { return Err(e); }
-                            break;
-                        }
+                        // 判定句末后关连接是服务端的正常收尾：没给 is_final，已出的字就是这句话的全部
+                        Err(_) if ended => break,
+                        Err(e) => return Err(e),
                     };
-                    let Ok(v) = serde_json::from_slice::<Value>(&chunk) else { continue };
-                    deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-                    if let Some(e) = server_error(&v) { return Err(anyhow!(e)); }
+                    // 无语音结束时服务端会先发一个空文本帧
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    let v: Value = serde_json::from_slice(&chunk).context("Chatterfly 响应解析失败")?;
+                    deadline = Instant::now() + IDLE;
+                    if let Some(e) = server_error(&v) {
+                        return Err(e);
+                    }
+                    ended |= utterance_ended(&v);
                     let t = transcript(&v);
                     if t != text {
                         text = t;
@@ -196,15 +183,8 @@ impl Engine for ChatterflyEngine {
                         break;
                     }
                 }
-                _ = tokio::time::sleep_until(deadline) => {
-                    if text.is_empty() { bail!("识别超时"); }
-                    break;
-                }
+                _ = tokio::time::sleep_until(deadline) => bail!("Chatterfly 响应超时"),
             }
-        }
-        let _ = sink.close().await;
-        if text.is_empty() && sent == 0 {
-            bail!("没有采集到音频");
         }
         Ok(text)
     }

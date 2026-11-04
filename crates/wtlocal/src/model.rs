@@ -93,8 +93,6 @@ impl Model {
             .find(|p| p.extension().is_some_and(|e| e == "xnet"))
             .context("模型文件不存在")?;
         let map = unsafe { Mmap::map(&std::fs::File::open(&xnet)?)? };
-        #[cfg(unix)]
-        let _ = map.advise(memmap2::Advice::WillNeed);
         let l = Loader { d: &map, r: xnet::parse(&map)? };
         let mut layers = Vec::with_capacity(LAYERS);
         for i in 0..LAYERS {

@@ -29,6 +29,13 @@ jobs:
         with:
           key: test
 
+      # tauri-build 编译期要求资源存在
+      - name: cloudflared
+        run: |
+          mkdir -p app/src-tauri/binaries
+          curl -fsSL -o app/src-tauri/binaries/cloudflared.exe \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
+
       # 界面是编译期嵌进 exe 的，没有 app/dist 连 voicekey 都编不过（不是测试才需要）
       - name: Frontend
         working-directory: app
@@ -62,10 +69,19 @@ jobs:
         with:
           key: x86_64-pc-windows-msvc
 
+      # 版本写在两处：根 Cargo.toml 的 workspace.package.version 与 tauri.conf.json。
+      # 两处必须一致，打 tag 时 tag 也必须与之一致，任一不符直接失败
       - name: Version
         run: |
-          VER="${GITHUB_REF_NAME#v}"
-          [[ "$GITHUB_REF_TYPE" == tag ]] || VER="0.0.0"
+          VER=$(node -p "require('./app/src-tauri/tauri.conf.json').version")
+          CARGO_VER=$(cargo metadata --no-deps --format-version 1 --locked \
+            | node -p "JSON.parse(require('fs').readFileSync(0)).packages.find((p) => p.name === 'voicekey').version")
+          if [[ "$CARGO_VER" != "$VER" ]]; then
+            echo "根 Cargo.toml 的 $CARGO_VER 与 tauri.conf.json 的 $VER 不一致"; exit 1
+          fi
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$VER" ]]; then
+            echo "tag $GITHUB_REF_NAME 与 tauri.conf.json 的 $VER 不一致"; exit 1
+          fi
           echo "VER=$VER" >> "$GITHUB_ENV"
 
       - name: cloudflared
@@ -78,8 +94,7 @@ jobs:
         working-directory: app
         run: |
           npm ci
-          npx tauri build --target x86_64-pc-windows-msvc --bundles msi,nsis \
-            --config "{\"version\":\"$VER\"}"
+          npx tauri build --target x86_64-pc-windows-msvc --bundles msi,nsis
 
       - name: Package
         run: |
@@ -88,13 +103,10 @@ jobs:
           cp $B/bundle/nsis/*-setup.exe "dist/VoiceKey-$VER-x64-setup.exe"
           cp $B/bundle/msi/*_zh-CN.msi "dist/VoiceKey-$VER-x64.msi"
 
-          # 免安装版：exe 与 runtime/tunnel/cloudflared.exe 放在一起即可运行
-          mkdir -p staging/VoiceKey/runtime/tunnel
-          cp $B/voicekey.exe staging/VoiceKey/
-          cp app/src-tauri/binaries/cloudflared.exe staging/VoiceKey/runtime/tunnel/
-          ZIP="$(command -v 7z || echo '/c/Program Files/7-Zip/7z.exe')"
-          "$ZIP" a -tzip "dist/VoiceKey-$VER-x64-portable.zip" ./staging/VoiceKey > /dev/null
-          rm -rf staging
+      # 免安装包与本地 scripts/build.ps1 -Package 走同一个脚本
+      - name: Portable
+        shell: pwsh
+        run: ./scripts/package.ps1 -Bin target/x86_64-pc-windows-msvc/release
 
       - uses: actions/upload-artifact@v4
         with:
@@ -117,4 +129,4 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
             --title "VoiceKey $GITHUB_REF_NAME" --generate-notes \
-            --notes "Windows 安装包（msi / exe）与免安装压缩包。装好后打开设置，用手机扫「手机接入」里的二维码，按住说话即可；按住时上滑可取消这一句。公网地址每次启动都会变，谁拿到它谁就能往这台电脑输入文字，不要外传。"
+            --notes "Windows 安装包（msi / exe）与免安装压缩包。装好后左键点托盘图标，用手机扫面板里的二维码，按住说话即可；按住时上滑可取消这一句，手机上半区可当触摸板。公网地址每次启动都会变，谁拿到它谁就能往这台电脑输入文字，不要外传。"

@@ -1,22 +1,22 @@
-//! 会话编排：手机按下 → 音频流 → 识别 → 上屏。
+//! 会话编排：手机按下 → 音频流 → 识别 → 上屏，以及手机触摸板落到鼠标。
 //!
-//! 状态机本身没变（Mode / gen / Segments / 超时 / 33ms 节流都是原来那套），
-//! 变的只是「谁开始一句话」：以前是全局快捷键加电脑麦克风，现在是手机端的 Press/Release，
-//! 音频由 `voicekey-remote` 交过来。用户松手就是结束，所以静音自动结束那套判定没有了。
+//! 一句话由手机端的 Press 开始、Release 结束，音频由 `voicekey-remote` 交过来。
+//! 判断（候选排序、焦点、迟到结果作废）在 `session::machine`，这里只管调用谁。
+
 use crate::session::engines::Engines;
 use crate::session::machine::{Choice, Picker, Tickets};
 use crate::session::types::{Mode, Model, Msg, Segments};
 use crate::settings::{Channel, Settings};
 use crate::ui;
-use crate::AppState;
+use crate::state::{model_ready, update_settings, AppState};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use voicekey_core::{Audio, QwenEngine};
-use voicekey_platform::{self as pf, Typer};
+use voicekey_platform::{self as pf, Pointer, Typer};
 use voicekey_remote::protocol;
-use voicekey_remote::{Event as RemoteEvent, Handle as RemoteHandle};
+use voicekey_remote::{Button, Conn, Event as RemoteEvent, Handle as RemoteHandle, Pad};
 
 pub struct Ctl {
     app: AppHandle,
@@ -37,7 +37,8 @@ pub struct Ctl {
     picker: Picker,
     last_emit: Instant,
     flush_pending: bool,
-    released_at: Option<Instant>,
+    /// 手机触摸板驱动的鼠标
+    pointer: Pointer,
 }
 
 pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) {
@@ -53,10 +54,10 @@ pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) 
         recording: false,
         typer: None,
         segs: Segments::default(),
-        picker: Picker::new(Vec::new(), |_| false, None, &std::collections::HashMap::new()),
+        picker: Picker::default(),
         last_emit: Instant::now(),
         flush_pending: false,
-        released_at: None,
+        pointer: Pointer::default(),
     };
     tauri::async_runtime::spawn(ctl.run(rx));
 }
@@ -70,35 +71,41 @@ impl Ctl {
 
     /// 上屏，并把「被高权限窗口拦住」如实说出来。
     /// 被拦下的文字留在剪贴板里，用户按一次 Ctrl+V 就能拿到，不算白说。
-    fn output(&mut self, text: &str, ch: Channel) {
-        if pf::paste(text) != pf::Pasted::Blocked {
-            ui::hud_hide(&self.app, 0);
-            return;
+    /// 返回是否被拦下：紧接着要报错的调用方把这句并进错误文案，免得提示被盖掉
+    fn output(&mut self, text: &str, ch: Channel) -> bool {
+        match pf::paste(text) {
+            Ok(pf::Pasted::Sent) => ui::hud_hide(&self.app, 0),
+            Ok(pf::Pasted::Blocked) => {
+                let msg = "目标窗口以管理员权限运行，文字已复制到剪贴板，请按 Ctrl+V";
+                self.publish(protocol::notice(msg));
+                ui::hud(&self.app, "info", "已复制到剪贴板 · 请手动粘贴", ch);
+                ui::hud_hide(&self.app, 2400);
+                return true;
+            }
+            Err(e) => {
+                crate::log_error!("上屏失败：{e}");
+                self.publish(protocol::error("session", format!("上屏失败：{e}")));
+                ui::hud_error(&self.app, &format!("上屏失败：{e}"));
+            }
         }
-        let msg = "目标窗口以管理员权限运行，文字已复制到剪贴板，请按 Ctrl+V";
-        self.publish(protocol::notice(msg));
-        ui::hud(&self.app, "info", "已复制到剪贴板 · 请手动粘贴", ch);
-        ui::hud_hide(&self.app, 2400);
+        false
     }
 
-    /// 记下这一句：连接页要展示「最近一句」，也让失败后能复查
-    fn record(&self, text: &str, ch: Channel, ms: Option<u64>) {
+    /// 出错但留下了已识别的文字：说清楚文字在哪
+    fn kept(blocked: bool) -> &'static str {
+        if blocked { "已复制到剪贴板，请按 Ctrl+V" } else { "已保留已识别的文字" }
+    }
+
+    /// 记下这一句：连接页要展示「最近一句」
+    fn record(&self, text: &str, ch: Channel) {
         let value = serde_json::json!({
             "text": text,
             "channel": ch,
-            "at": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-            "ms": ms,
+            "at": voicekey_core::util::now_ms() / 1000,
         });
         let st = self.app.state::<AppState>();
         *st.last.write().unwrap() = Some(value.clone());
         let _ = self.app.emit("last", value);
-    }
-
-    fn settings(&self) -> Settings {
-        self.settings.read().unwrap().clone()
     }
 
     fn publish(&self, value: serde_json::Value) {
@@ -109,7 +116,7 @@ impl Ctl {
 
     fn handle(&mut self, m: Msg) {
         match m {
-            Msg::Remote(e, audio) => self.remote_event(e, audio),
+            Msg::Remote(e) => self.remote_event(e),
             Msg::Partial { gen, ch, seg, text } if self.tickets.accepts(gen) => self.partial(ch, seg, text),
             Msg::Done { gen, ch, seg, res } if self.tickets.accepts(gen) => self.done(ch, seg, res),
             Msg::Timeout { token } if self.tickets.timeout_is_current(token) && self.mode != Mode::Idle => {
@@ -117,42 +124,64 @@ impl Ctl {
             }
             Msg::Flush => {
                 self.flush_pending = false;
-                self.emit_rows();
+                // 节流期间这一句可能已经上屏或取消：候选已收起，不能再推一份旧的出去
+                if self.mode == Mode::Pick {
+                    self.emit_rows();
+                }
+            }
+            Msg::Reset(reason) => {
+                self.abort(reason);
+                log(self.pointer.release_all());
             }
             _ => {}
         }
     }
 
-    fn remote_event(&mut self, e: RemoteEvent, audio: Option<Audio>) {
+    fn remote_event(&mut self, e: RemoteEvent) {
         match e {
-            RemoteEvent::Press => self.press(audio),
+            RemoteEvent::Press(audio) => self.press(audio),
             RemoteEvent::Release => self.release(),
             RemoteEvent::Cancel => self.cancel_current(),
-            RemoteEvent::Abort(reason) => {
-                if self.mode != Mode::Idle {
-                    self.abort(reason)
-                }
-            }
+            RemoteEvent::Abort(reason) => self.abort(reason),
             RemoteEvent::Commit(channel) => self.commit(&channel),
-            // 说到一半不给删：流式打字机记着已打的字数，外部退格会让它失准
-            RemoteEvent::Erase(n) if !self.recording => pf::backspace(n as usize),
-            RemoteEvent::Erase(_) => {}
+            // 流式上屏途中不给删：打字机记着已打的字，外部退格会让它失准
+            RemoteEvent::Erase if self.typer.is_none() => log(pf::backspace(1)),
+            RemoteEvent::Erase => {}
+            RemoteEvent::Pad(conn, p) => self.pad(conn, p),
+            RemoteEvent::Gone(conn) => log(self.pointer.release(conn)),
         }
     }
 
-    fn press(&mut self, audio: Option<Audio>) {
-        let Some(audio) = audio else {
-            ui::hud_error(&self.app, "没有收到音频");
-            return;
+    /// 触摸板：位移乘上用户设定的速度，按键原样落地
+    fn pad(&mut self, conn: Conn, p: Pad) {
+        let button = |b: Button| match b {
+            Button::Left => pf::Button::Left,
+            Button::Right => pf::Button::Right,
+            Button::Middle => pf::Button::Middle,
         };
+        let r = match p {
+            Pad::Move { x, y } => {
+                let k = self.settings.read().unwrap().pointer_speed;
+                self.pointer.move_by(x * k, y * k)
+            }
+            Pad::Scroll { x, y } => self.pointer.scroll(x, y),
+            Pad::Down { b } => self.pointer.down(conn, button(b)),
+            Pad::Up { b } => self.pointer.up(conn, button(b)),
+            Pad::Click { b } => self.pointer.click(button(b)),
+        };
+        log(r);
+    }
+
+    fn press(&mut self, audio: Audio) {
         match self.mode {
             Mode::Idle => {
-                self.prewarm();
-                let s = self.settings();
+                let s = self.settings.read().unwrap().clone();
                 if s.channel == Channel::All {
-                    self.begin_multi(s.multi, audio);
+                    self.engines.prewarm(&s.multi);
+                    self.begin_multi(s, audio);
                 } else {
-                    self.begin_single(s.channel, audio);
+                    self.engines.prewarm(&[s.channel]);
+                    self.begin_single(s, audio);
                 }
             }
             // 上一句还在定稿或候选里：接着说，结果接在后面
@@ -160,20 +189,15 @@ impl Ctl {
         }
     }
 
-    fn prewarm(&self) {
-        let ch = self.settings().channel;
-        let list = if ch == Channel::All { self.settings().multi } else { vec![ch] };
-        self.engines.prewarm(&list);
-    }
-
-    fn begin_single(&mut self, ch: Channel, audio: Audio) {
+    fn begin_single(&mut self, s: Settings, audio: Audio) {
+        let ch = s.channel;
         self.tickets.next_generation();
         self.mode = Mode::Single(ch);
         self.recording = true;
         // 高权限窗口收不到任何模拟输入，流式上屏会「看着在录、实际一个字没进」，
         // 这种时候直接走剪贴板路径，并且明说一句
         let blocked = pf::input_blocked();
-        self.typer = (self.settings().streaming && !blocked).then(Typer::default);
+        self.typer = (s.streaming && !blocked).then(Typer::default);
         if blocked {
             self.publish(protocol::notice("当前窗口以管理员权限运行，将改用剪贴板粘贴"));
         }
@@ -184,14 +208,12 @@ impl Ctl {
         self.engines.spawn(ch, seg, gen, audio, tx);
     }
 
-    fn begin_multi(&mut self, channels: Vec<Channel>, audio: Audio) {
-        let s = self.settings();
+    fn begin_multi(&mut self, s: Settings, audio: Audio) {
         self.tickets.next_generation();
         self.mode = Mode::Pick;
         self.recording = true;
-        self.released_at = None;
         // 行的排序、跳过、默认焦点都在 Picker 里，这里只负责把音频扇出去
-        self.picker = Picker::new(channels, crate::model_ready, s.last_pick, &s.pick_counts);
+        self.picker = Picker::new(s.multi, model_ready, s.last_pick, &s.pick_counts);
         let targets = self.picker.start_round();
         let (gen, tx) = (self.tickets.generation(), self.tx.clone());
         self.engines.fan_out(audio, targets, gen, tx);
@@ -211,7 +233,6 @@ impl Ctl {
             let (gen, tx) = (self.tickets.generation(), self.tx.clone());
             return self.engines.spawn(ch, seg, gen, audio, tx);
         }
-        self.released_at = None;
         let targets = self.picker.start_round();
         let (gen, tx) = (self.tickets.generation(), self.tx.clone());
         self.engines.fan_out(audio, targets, gen, tx);
@@ -230,10 +251,10 @@ impl Ctl {
                 if !changed {
                     return;
                 }
-                if let Some(t) = self.typer.as_mut() {
-                    t.update(&self.segs.text());
-                }
                 let text = self.segs.text();
+                if let Some(t) = self.typer.as_mut() {
+                    log(t.update(&text));
+                }
                 // 人盯着手机看，实时文字必须发到手机上去
                 self.publish(protocol::partial(text));
                 self.hud_single(ch);
@@ -253,7 +274,7 @@ impl Ctl {
                 let text = self.segs.text();
                 if !self.segs.finished() {
                     if let Some(t) = self.typer.as_mut().filter(|_| !text.is_empty()) {
-                        t.update(&text);
+                        log(t.update(&text));
                     }
                     return;
                 }
@@ -264,27 +285,19 @@ impl Ctl {
                 let typer = self.typer.take();
                 let error = self.segs.error.take();
                 let streamed = typer.is_some();
-                if let Some(mut t) = typer {
-                    // 定稿可能与流式结果不同（数字/标点整理），按差异修正；之后到达的迟到片段丢弃
-                    if !text.is_empty() {
-                        t.update(&text);
-                    }
-                    t.finish();
+                if let Some(mut t) = typer.filter(|_| !text.is_empty()) {
+                    // 定稿可能与流式结果不同（数字/标点整理），按差异修正。打字机随后丢弃，这一句到此为止
+                    log(t.update(&text));
                 }
                 if let Some(e) = error {
-                    if !streamed && !text.is_empty() {
-                        self.output(&text, ch);
-                    }
+                    let blocked = !streamed && !text.is_empty() && self.output(&text, ch);
                     let msg = if text.is_empty() {
                         format!("识别失败：{e}")
                     } else {
-                        format!("识别失败：{e}，已保留已识别的文字")
+                        format!("识别失败：{e}，{}", Self::kept(blocked))
                     };
                     self.publish(protocol::error("asr", msg.as_str()));
                     ui::hud_error(&self.app, &msg);
-                } else if streamed {
-                    ui::hud_hide(&self.app, 0);
-                    self.publish(protocol::fin(text));
                 } else if text.is_empty() {
                     // 桌面上只有一行"没有识别到内容"，手机上什么原因都看不到，
                     // 所以给一句能立刻照做的话
@@ -293,14 +306,17 @@ impl Ctl {
                     ui::hud_hide(&self.app, 1000);
                     self.publish(protocol::fin(""));
                 } else {
-                    self.output(&text, ch);
-                    self.record(&text, ch, None);
+                    if streamed {
+                        ui::hud_hide(&self.app, 0);
+                    } else {
+                        self.output(&text, ch);
+                    }
+                    self.record(&text, ch);
                     self.publish(protocol::fin(text));
                 }
             }
             Mode::Pick => {
-                let ms = self.released_at.map(|t| t.elapsed().as_millis() as u64);
-                self.picker.on_done(ch, seg, res, ms);
+                self.picker.on_done(ch, seg, res);
                 // 全都不在识别中了：把「等定稿」的超时撤掉，免得误报
                 if self.picker.all_settled() {
                     self.tickets.next_timeout();
@@ -321,7 +337,6 @@ impl Ctl {
         match self.mode {
             Mode::Single(ch) => ui::hud(&self.app, "wait", "", ch),
             Mode::Pick => {
-                self.released_at = Some(Instant::now());
                 self.picker.release();
                 self.emit_rows();
             }
@@ -335,7 +350,8 @@ impl Ctl {
         });
     }
 
-    /// 打断：定稿超时、手机断线。已经识别出的文字尽量留下
+    /// 打断：定稿超时、手机断线。已经识别出的文字尽量留下：
+    /// 单渠道留下已识别的部分，多渠道留下已定稿的那一条（焦点行优先）
     fn abort(&mut self, message: String) {
         if self.mode == Mode::Idle {
             return;
@@ -343,40 +359,36 @@ impl Ctl {
         let streamed = self.typer.is_some();
         let (partial, ch) = match self.mode {
             Mode::Single(ch) => (self.segs.text(), ch),
-            Mode::Pick => {
-                self.picker.selected().unwrap_or_else(|| (String::new(), self.settings().channel))
-            }
-            Mode::Idle => (String::new(), self.settings().channel),
+            _ => self.picker.settled().unwrap_or((String::new(), Channel::All)),
         };
         self.cancel(false);
         // 非流式时中间结果还没写进输入框，补上；流式已经打出去了，不重复写
-        if !streamed && !partial.is_empty() {
-            self.output(&partial, ch);
-        }
-        let text = if partial.is_empty() { message } else { format!("{message}，已保留已识别的文字") };
+        let blocked = !streamed && !partial.is_empty() && self.output(&partial, ch);
+        let text = if partial.is_empty() { message } else { format!("{message}，{}", Self::kept(blocked)) };
         self.publish(protocol::error("session", text.as_str()));
         ui::hud_error(&self.app, &text);
     }
 
+    /// 结束这一句：作废在途结果、停掉引擎、收起候选。
+    /// `revert` 时把已经流式打出去的字退回来，输入框里不留半句
     fn cancel(&mut self, revert: bool) {
         self.tickets.next_generation();
         self.tickets.next_timeout();
         self.engines.abort_all();
         self.recording = false;
-        if let Some(mut t) = self.typer.take() {
-            // 用户取消时把已经流式打出去的字退回来，输入框里不留半句
-            if revert {
-                t.discard();
-            } else {
-                t.finish();
-            }
+        if let Some(t) = self.typer.take().filter(|_| revert) {
+            log(t.discard());
+        }
+        if self.mode == Mode::Pick {
+            self.picker.clear();
+            self.publish(protocol::rows(serde_json::json!(Model { rows: &[], sel: 0 })));
         }
         self.mode = Mode::Idle;
     }
 
     /// 手机上滑取消：这一句不要了，什么都不上屏
     fn cancel_current(&mut self) {
-        if self.mode == Mode::Idle && !self.recording {
+        if self.mode == Mode::Idle {
             return;
         }
         self.cancel(true);
@@ -403,13 +415,13 @@ impl Ctl {
             }
             Choice::Commit => {
                 let Some((text, ch)) = self.picker.take(i) else { return };
-                crate::update_settings(&self.app, |s| {
+                log(update_settings(&self.app, |s| {
                     s.last_pick = Some(ch);
                     *s.pick_counts.entry(ch).or_default() += 1;
-                });
+                }));
                 self.cancel(false);
                 self.output(&text, ch);
-                self.record(&text, ch, None);
+                self.record(&text, ch);
                 self.publish(protocol::fin(text));
             }
         }
@@ -430,14 +442,15 @@ impl Ctl {
             return;
         }
         self.last_emit = Instant::now();
-        let text = match self.mode {
-            Mode::Single(_) => self.segs.text(),
-            _ => String::new(),
-        };
-        let model = Model { recording: self.recording, rows: self.picker.rows(), sel: self.picker.sel(), text };
-        if let Ok(v) = serde_json::to_value(&model) {
-            self.publish(protocol::rows(v));
-        }
+        let model = Model { rows: self.picker.rows(), sel: self.picker.sel() };
+        self.publish(protocol::rows(serde_json::json!(model)));
+    }
+}
+
+/// 键鼠注入失败只记日志：一次注入失败不该打断整句话，下一次多半就好了
+fn log(r: Result<(), String>) {
+    if let Err(e) = r {
+        crate::log_warn!("{e}");
     }
 }
 

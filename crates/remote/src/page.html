@@ -2,27 +2,39 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="theme-color" content="#f7f7f4">
+<!-- 禁止缩放：双指滑动、连点是触摸板手势，不能被浏览器拿去缩放页面 -->
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#f7f7f4" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#171714" media="(prefers-color-scheme: dark)">
 <title>VoiceKey</title>
 <style>
+  /* 与电脑端 tokens.css 同一套颜色，只取这页用得到的几个：主色只用于「录音 / 激活」 */
   :root {
-    color-scheme: light;
-    --bg: #f7f7f4;
-    --ink: #1a1915;
-    --muted: #6b6b66;
-    --faint: #b6b6b0;
-    --line: rgba(24, 22, 16, .10);
-    --brand: #d9552b;
-    --red: #b34040;
-    --green: #1d9e75;
+    color-scheme: light dark;
+    --bg: #f7f7f4; --card: #ffffff; --card-2: #faf9f6;
+    --line: rgba(24, 22, 16, .10); --line-2: rgba(24, 22, 16, .18);
+    --fg: #1a1915; --fg-2: #5f5e56; --fg-3: #9b9a91;
+    --accent: #d9552b; --accent-soft: rgba(217, 85, 43, .10);
+    --ok: #1d9e75; --err: #c0392b;
+    --key: #1a1915; --key-fg: #ffffff;
+    --shadow: 0 1px 2px rgba(24, 22, 16, .03), 0 12px 28px -22px rgba(24, 22, 16, .45);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #171714; --card: #232320; --card-2: #1e1e1b;
+      --line: rgba(255, 255, 255, .09); --line-2: rgba(255, 255, 255, .16);
+      --fg: #ecebe4; --fg-2: #a5a49b; --fg-3: #6e6d66;
+      --accent: #e8734a; --accent-soft: rgba(232, 115, 74, .14);
+      --ok: #3fb98a; --err: #e2685a;
+      --key: #ecebe4; --key-fg: #171714;
+      --shadow: 0 12px 28px -20px rgba(0, 0, 0, .8);
+    }
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   button { font: inherit; color: inherit; border: none; background: none; padding: 0; }
   html, body {
     margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none;
-    background: var(--bg); color: var(--ink);
+    background: var(--bg); color: var(--fg);
     font: 15px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
     -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
     touch-action: none;
@@ -31,164 +43,207 @@
 
   #app {
     height: 100%; display: flex; flex-direction: column; gap: 12px;
-    padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
+    padding: calc(14px + env(safe-area-inset-top)) 14px calc(14px + env(safe-area-inset-bottom));
   }
 
-  /* 顶栏：状态点 + 状态，右侧是链路统计 */
-  #bar { display: flex; align-items: center; gap: 8px; font-size: 13px; letter-spacing: .2px; }
-  #dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #c9c9c4; transition: background .2s, box-shadow .2s; }
-  #dot.on { background: var(--green); box-shadow: 0 0 0 3px rgba(29, 158, 117, .13); }
-  #state { color: #3d3d38; font-weight: 500; }
-  #hint { margin-left: auto; font-size: 11.5px; color: #9b9b95; font-variant-numeric: tabular-nums; }
+  /* 顶栏：状态点 + 状态，右侧是录音计时 */
+  #bar { display: flex; align-items: center; gap: 8px; min-height: 28px; font-size: 13px; padding: 0 2px; }
+  #dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--fg-3); transition: background .2s, box-shadow .2s; }
+  #dot.on { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
+  #state { color: var(--fg-2); font-weight: 500; }
+  #hint { margin-left: auto; font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
 
-  /* 结果卡片：录音与取消两个状态都换描边，拇指挡住按钮时也看得出处于哪一态 */
-  #card {
-    flex: 1; min-height: 0; display: flex; flex-direction: column;
-    padding: 16px 16px 10px; border-radius: 18px; background: #fff;
-    border: 1px solid var(--line);
-    box-shadow: 0 1px 2px rgba(24, 22, 16, .03), 0 12px 28px -22px rgba(24, 22, 16, .45);
-    transition: border-color .18s ease, box-shadow .18s ease;
+  /* 触摸板：整张卡片都是触控面，识别文字浮在上半部分，不挡手指 */
+  #pad {
+    position: relative; flex: 1; min-height: 0; overflow: hidden;
+    border-radius: 20px; background: var(--card); border: 1px solid var(--line);
+    box-shadow: var(--shadow); touch-action: none;
+    transition: border-color .18s ease, box-shadow .18s ease, background .18s ease;
   }
-  #card.rec { border-color: rgba(217, 85, 43, .42); box-shadow: 0 1px 2px rgba(217, 85, 43, .06), 0 12px 28px -20px rgba(217, 85, 43, .5); }
-  #card.arm { border-color: rgba(179, 64, 64, .5); box-shadow: 0 1px 2px rgba(179, 64, 64, .08), 0 12px 28px -20px rgba(179, 64, 64, .5); }
+  #pad.rec { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+  #pad.arm { border-color: color-mix(in srgb, var(--err) 55%, transparent); }
+  #pad.drag { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 4%, var(--card)); }
+  #pad.off { opacity: .55; }
 
+  /* 只显示最新几行：文字从底部往上长，旧的在顶上淡出 */
   #text {
-    flex: 1; min-height: 0; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
-    line-height: 1.75; font-size: 15.5px;
-    -webkit-user-select: text; user-select: text; touch-action: pan-y;
+    position: absolute; left: 0; right: 0; top: 0; max-height: 58%;
+    padding: 16px 18px 0; display: flex; flex-direction: column; justify-content: flex-end;
+    overflow: hidden; pointer-events: none;
+    white-space: pre-wrap; word-break: break-word; line-height: 1.7; font-size: 16px;
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 28px);
+            mask-image: linear-gradient(to bottom, transparent 0, #000 28px);
   }
-  #text.ph { color: var(--faint); }
+  #text.ph { color: var(--fg-3); font-size: 14.5px; }
 
-  /* 提示条：取消结果、切换通道、没听清这类一句话说明都走这里 */
+  /* 空闲时的使用说明，有文字后让位 */
+  #guide {
+    position: absolute; left: 0; right: 0; bottom: 18px; pointer-events: none;
+    display: flex; justify-content: center; gap: 14px; flex-wrap: wrap; padding: 0 14px;
+    font-size: 12px; color: var(--fg-3); transition: opacity .2s ease;
+  }
+  #guide span { display: inline-flex; align-items: center; gap: 5px; }
+  #guide b { font-weight: 500; color: var(--fg-2); }
+  #pad.touched #guide { opacity: 0; }
+
+  #chip {
+    position: absolute; right: 12px; bottom: 12px; pointer-events: none;
+    padding: 3px 10px; border-radius: 999px; font-size: 12px;
+    color: var(--accent); background: var(--accent-soft);
+    opacity: 0; transform: translateY(4px); transition: opacity .15s ease, transform .15s ease;
+  }
+  #pad.drag #chip { opacity: 1; transform: none; }
+
+  /* 指尖落点：轻量反馈，让人知道触摸被接住了 */
+  .finger {
+    position: absolute; width: 44px; height: 44px; margin: -22px 0 0 -22px; border-radius: 50%;
+    background: color-mix(in srgb, var(--fg) 8%, transparent); pointer-events: none;
+    transition: opacity .2s ease;
+  }
+  #pad.drag .finger { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+
+  /* 提示条：取消结果、没听清这类一句话说明都走这里 */
   #note {
     padding: 10px 13px; border-radius: 12px; font-size: 13px; line-height: 1.6;
-    background: #fbf3ee; border: 1px solid rgba(217, 85, 43, .16); color: #8a4a2c;
+    background: var(--accent-soft); color: var(--fg);
+    border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
     animation: noteIn .22s cubic-bezier(.22, .68, .36, 1);
   }
   @keyframes noteIn { from { opacity: 0; transform: translateY(-6px); } }
 
-  /* 系统里关了动效就只保留状态色，不要动画 */
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
-    #tip { transform: translate(-50%, 0); }
-    #tip::before { opacity: var(--p); }
-  }
-
   /* 多渠道候选 */
-  #rows { display: flex; flex-direction: column; gap: 8px; max-height: 30vh; overflow-y: auto; touch-action: pan-y; }
+  #rows { display: flex; flex-direction: column; gap: 7px; max-height: 32vh; overflow-y: auto; touch-action: pan-y; }
   .row {
-    display: flex; align-items: center; gap: 10px; padding: 11px 13px; background: #fff;
-    border: 1px solid var(--line); border-radius: 14px;
-    transition: border-color .12s ease, background .12s ease;
+    display: flex; align-items: center; gap: 10px; padding: 11px 13px; background: var(--card); text-align: left;
+    border: 1px solid var(--line); border-radius: 14px; transition: border-color .12s ease, background .12s ease;
   }
   .row .name { flex: none; font-size: 13px; font-weight: 600; }
-  .row .txt { flex: 1; font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .row .st { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #c9c9c4; }
-  .row.listen .st { background: var(--brand); animation: pulse 1s ease-in-out infinite; }
-  .row.final .st { background: var(--green); }
-  .row.error .st { background: var(--red); }
-  .row.sel { border-color: var(--ink); background: #faf9f6; }
+  .row .txt { flex: 1; font-size: 13px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .st { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--fg-3); }
+  .row.listen .st { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+  .row.final .st { background: var(--ok); }
+  .row.error .st { background: var(--err); }
+  .row.sel { border-color: var(--fg); background: var(--card-2); }
   .row.shake { animation: shake .4s ease; }
   @keyframes pulse { 50% { opacity: .35; } }
   @keyframes shake { 20%, 60% { transform: translateX(-5px); } 40%, 80% { transform: translateX(5px); } }
-
   /* 底部：退格 + 按住说话 */
-  #stage { position: relative; display: flex; gap: 10px; height: 21vh; min-height: 126px; max-height: 176px; }
+  #stage { position: relative; flex: none; display: flex; gap: 10px; height: 18vh; min-height: 110px; max-height: 156px; }
 
-  /* 取消指示：白底小胶囊 + 进度环。拇指盖着按钮，它浮在上方
-     --p 由手指位移直接驱动：环按比例填满，胶囊随之上浮 */
+  /* 取消指示：小胶囊 + 进度环。拇指盖着按钮，它浮在上方。--p 由手指位移直接驱动 */
   #tip {
     --p: 0; --vis: 0;
-    position: absolute; left: 50%; bottom: calc(100% + 12px);
+    position: absolute; left: 50%; bottom: calc(100% + 12px); z-index: 2;
     display: inline-flex; align-items: center; gap: 8px; padding: 5px 14px 5px 5px;
-    border-radius: 999px; background: #fff; color: #3d3d38;
-    border: 1px solid rgba(24, 22, 16, .09);
-    font-size: 12.5px; letter-spacing: .3px; white-space: nowrap;
-    pointer-events: none; will-change: transform, opacity;
+    border-radius: 999px; background: var(--card); color: var(--fg-2); border: 1px solid var(--line);
+    font-size: 12.5px; white-space: nowrap; pointer-events: none;
     opacity: calc(var(--vis) * (.8 + var(--p) * .2));
     transform: translate(-50%, calc(8px - var(--p) * 15px)) scale(calc(.96 + var(--p) * .04));
-    transition: opacity .18s ease, transform .18s cubic-bezier(.22, .68, .36, 1), color .15s ease, border-color .15s ease;
-    /* 背景色描一圈：浮在卡片边缘上也不会糊成一块 */
-    box-shadow: 0 0 0 3px var(--bg), 0 10px 24px -16px rgba(24, 22, 16, .55);
+    transition: opacity .18s ease, transform .18s cubic-bezier(.22, .68, .36, 1), color .15s ease;
+    box-shadow: 0 0 0 3px var(--bg), 0 10px 24px -16px rgba(0, 0, 0, .55);
   }
   #tip.show { --vis: 1; }
-  #tip.arm { color: var(--red); border-color: rgba(179, 64, 64, .3); }
-
-  /* 进度环：conic-gradient 按 --p 填色，中间挖空后放一个会转身的箭头 */
+  #tip.arm { color: var(--err); }
   #tip .ring {
     position: relative; flex: none; width: 24px; height: 24px; border-radius: 50%;
-    background: conic-gradient(var(--red) calc(var(--p) * 360deg), rgba(24, 22, 16, .13) 0);
+    background: conic-gradient(var(--err) calc(var(--p) * 360deg), var(--line-2) 0);
     display: grid; place-items: center;
   }
-  #tip .ring::before {
-    content: ''; position: absolute; inset: 3px; border-radius: 50%; background: #fff;
-  }
-  #tip .ring svg {
-    position: relative; z-index: 1; width: 12px; height: 12px;
-    transform: rotate(calc(var(--p) * 180deg));
-    transition: transform .18s cubic-bezier(.22, .68, .36, 1);
-  }
+  #tip .ring::before { content: ''; position: absolute; inset: 3px; border-radius: 50%; background: var(--card); }
+  #tip .ring svg { position: relative; z-index: 1; width: 12px; height: 12px; transform: rotate(calc(var(--p) * 180deg)); }
 
   #del {
-    flex: none; width: 84px; border-radius: 20px; border: 1px solid rgba(24, 22, 16, .12);
-    background: #fff; color: #55554f; display: flex; align-items: center; justify-content: center;
+    flex: none; width: 80px; border-radius: 20px; border: 1px solid var(--line-2);
+    background: var(--card); color: var(--fg-2); display: flex; align-items: center; justify-content: center;
     transition: transform .07s ease, background .15s ease, opacity .15s ease;
   }
-  #del:active { transform: scale(.96); background: #efefeb; }
+  #del:active { transform: scale(.96); background: var(--card-2); }
   #del.off { opacity: .3; pointer-events: none; }
 
   #talk {
-    position: relative; flex: 1; border-radius: 20px; background: var(--ink); color: #fff;
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px;
-    overflow: hidden;
-    transition: background .2s ease, transform .14s cubic-bezier(.22, .68, .36, 1), box-shadow .24s ease;
+    position: relative; flex: 1; border-radius: 20px; background: var(--key); color: var(--key-fg);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; overflow: hidden;
+    transition: background .2s ease, transform .14s cubic-bezier(.22, .68, .36, 1), opacity .2s ease;
   }
   #talk:active:not(.arm) { transform: scale(.985); }
-  #talk.rec { background: var(--brand); box-shadow: 0 14px 28px -18px rgba(217, 85, 43, .95); }
-  #talk.arm { background: var(--red); transform: scale(.972); box-shadow: 0 8px 20px -14px rgba(179, 64, 64, .95); }
-  /* 文字与波形叠在同一格里，切换时位置不跳 */
+  #talk.rec { background: var(--accent); color: #fff; }
+  #talk.arm { background: var(--err); color: #fff; transform: scale(.972); }
+  #talk.off { opacity: .4; }
   #stack { display: grid; place-items: center; min-height: 30px; }
   #stack > * { grid-area: 1 / 1; }
-  #tlabel {
-    font-size: 18px; font-weight: 500; letter-spacing: 1.5px;
-    transition: opacity .14s ease, transform .2s cubic-bezier(.22, .68, .36, 1);
-  }
-  #tsub { font-size: 11.5px; opacity: .62; letter-spacing: .4px; transition: opacity .15s ease; }
-  #wave {
-    display: flex; align-items: center; gap: 4px; height: 30px;
-    opacity: 0; pointer-events: none; transition: opacity .16s ease;
-  }
-  /* 录音时文字让位给波形：柱子高度跟真实电平走 */
+  #tlabel { font-size: 18px; font-weight: 500; letter-spacing: 1.5px; transition: opacity .14s ease, transform .2s ease; }
+  #tsub { font-size: 11.5px; opacity: .62; }
+  #wave { display: flex; align-items: center; gap: 4px; height: 30px; opacity: 0; transition: opacity .16s ease; }
   #talk.rec:not(.arm) #tlabel { opacity: 0; transform: translateY(-6px); }
   #talk.rec:not(.arm) #wave { opacity: 1; }
-  #wave i {
-    display: block; width: 3px; height: 4px; border-radius: 2px;
-    background: rgba(255, 255, 255, .92);
-  }
+  #wave i { display: block; width: 3px; height: 4px; border-radius: 2px; background: currentColor; opacity: .92; }
 
-  /* 麦克风授权页 */
-  #gate {
-    position: fixed; inset: 0; background: var(--bg); display: flex; align-items: center;
+  /* 整页提示：麦克风授权、电脑已断开。断开盖在授权之上，它说的事更根本 */
+  .gate {
+    position: fixed; inset: 0; z-index: 9; background: var(--bg); display: flex; align-items: center;
     justify-content: center; flex-direction: column; gap: 18px; padding: 36px; text-align: center;
   }
-  #gate .mark {
-    width: 46px; height: 46px; border-radius: 14px; background: var(--ink); color: #fff;
+  #lost { z-index: 10; }
+  .gate .mark {
+    width: 48px; height: 48px; border-radius: 14px; background: var(--key); color: var(--key-fg);
     display: flex; align-items: center; justify-content: center;
   }
-  #gate .mark svg { width: 24px; height: 24px; }
-  #gate p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.7; max-width: 300px; }
-  #gate button { background: var(--ink); color: #fff; font-size: 16px; padding: 15px 38px; border-radius: 999px; letter-spacing: .5px; }
+  .gate .mark svg { width: 24px; height: 24px; }
+  .gate p { margin: 0; color: var(--fg-2); font-size: 14px; line-height: 1.7; max-width: 300px; }
+  .gate p b { display: block; margin-bottom: 2px; color: var(--fg); font-size: 16px; font-weight: 600; }
+  .gate button { background: var(--key); color: var(--key-fg); font-size: 16px; padding: 15px 38px; border-radius: 999px; }
+  .gate button:disabled { opacity: .5; }
+
+  /* 重连中的小入口：电脑可能已经重启、地址变了，不必干等 */
+  #rescan {
+    display: inline-flex; align-items: center; gap: 5px; padding: 4px 11px 4px 9px; border-radius: 999px;
+    border: 1px solid var(--line-2); background: var(--card); color: var(--fg-2); font-size: 12.5px;
+  }
+  #rescan svg { width: 14px; height: 14px; }
+
+  /* 扫码取景：暗场 + 留出取景框 */
+  #scan { position: fixed; inset: 0; z-index: 20; background: #000; color: #fff; }
+  #scan video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #scan .frame {
+    position: absolute; left: 50%; top: 42%; width: min(64vw, 260px); aspect-ratio: 1; transform: translate(-50%, -50%);
+    border-radius: 22px; outline: 2px solid rgba(255, 255, 255, .9); box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .5);
+  }
+  #scan .msg {
+    position: absolute; left: 24px; right: 24px; top: calc(42% + min(32vw, 130px) + 24px);
+    text-align: center; font-size: 14px; line-height: 1.6;
+  }
+  #scan .cancel {
+    position: absolute; left: 50%; bottom: calc(32px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+    padding: 12px 36px; border-radius: 999px; background: rgba(255, 255, 255, .18); color: #fff; font-size: 15px;
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+  }
 </style>
 </head>
 <body>
 <div id="app">
-  <div id="bar"><span id="dot"></span><span id="state">未连接</span><span id="hint"></span></div>
-
-  <div id="card">
-    <div id="text" class="ph">按住下方按钮说话，电脑端会收到音频。</div>
+  <div id="bar">
+    <span id="dot"></span><span id="state">未连接</span><span id="hint"></span>
+    <button id="rescan" class="hide">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10"/>
+      </svg>扫码
+    </button>
   </div>
 
-  <div id="note" class="hide"></div>
+  <div id="pad" class="off" role="application" aria-label="触摸板">
+    <div id="text" class="ph">按住下方按钮说话，文字会打进电脑当前的输入框。</div>
+    <div id="guide">
+      <span><b>滑动</b>移光标</span><span><b>轻点</b>单击</span><span><b>点按再滑</b>拖拽</span>
+      <span><b>双指点</b>右键</span><span><b>双指滑</b>滚动</span>
+    </div>
+    <span id="chip">拖拽中</span>
+  </div>
+
+  <div id="note" class="hide" role="status"></div>
   <div id="rows" class="hide"></div>
 
   <div id="stage">
@@ -206,7 +261,7 @@
         <path d="M12 9.5l5 5M17 9.5l-5 5"/>
       </svg>
     </button>
-    <button id="talk">
+    <button id="talk" class="off">
       <span id="stack">
         <span id="tlabel">按住说话</span>
         <span id="wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
@@ -216,54 +271,212 @@
   </div>
 </div>
 
-<div id="gate">
+<div id="lost" class="gate hide" role="alertdialog" aria-labelledby="lostTitle">
+  <div class="mark">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+         stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10"/>
+    </svg>
+  </div>
+  <p><b id="lostTitle">这张二维码已失效</b>扫描电脑上的新二维码即可继续。</p>
+  <button id="lostscan">扫码重连</button>
+</div>
+
+<div id="scan" class="hide" role="dialog" aria-label="扫码">
+  <video playsinline muted></video>
+  <div class="frame"></div>
+  <div class="msg" id="scanmsg" aria-live="polite"></div>
+  <button class="cancel" id="scancancel">取消</button>
+</div>
+
+<div id="gate" class="gate">
   <div class="mark">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
          stroke-linecap="round" stroke-linejoin="round">
       <rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>
     </svg>
   </div>
-  <p>需要允许麦克风。<br>这个页面只在你按住时采集声音。</p>
+  <p>需要允许麦克风。<br>电脑只在你按住按钮时识别声音。</p>
   <button id="enable">启用麦克风</button>
 </div>
 
 <script>
+'use strict';
 const token = new URLSearchParams(location.search).get('t') || '';
-const RATE = 16000, FRAME = 320;
 const $ = (id) => document.getElementById(id);
-const textEl = $('text'), talkEl = $('talk'), stateEl = $('state'), dotEl = $('dot'), hintEl = $('hint'), rowsEl = $('rows');
-const cardEl = $('card'), noteEl = $('note'), tipEl = $('tip'), tipTextEl = $('tiptext');
-const labelEl = $('tlabel'), subEl = $('tsub');
-const delEl = $('del');
+const padEl = $('pad'), textEl = $('text'), talkEl = $('talk'), delEl = $('del'), rowsEl = $('rows');
+const stateEl = $('state'), dotEl = $('dot'), hintEl = $('hint'), noteEl = $('note');
+const tipEl = $('tip'), tipTextEl = $('tiptext'), labelEl = $('tlabel'), subEl = $('tsub');
+const PH = '按住下方按钮说话，文字会打进电脑当前的输入框。';
+const errText = (e) => (e && e.message ? e.message : String(e));
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// ---- 链路：WS 走隧道做信令，音频与触摸板都走 WebRTC 直连 ----
+let ws = null, pc = null, dc = null, stream = null, track = null;
+let ice = [], linked = false, kicked = false, offerId = 0;
+let lostAt = 0;                 // 这次断线从什么时候开始，0 表示连着
+const RESCAN_AFTER = 4000;      // 断线超过这么久才露出扫码入口：一两秒的网络抖动不该打扰人
+
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+function ready() { return linked && dc !== null && dc.readyState === 'open'; }
+
+function setState(text, ok) { stateEl.textContent = text; dotEl.className = ok ? 'on' : ''; }
+function refresh() {
+  const ok = ready();
+  padEl.classList.toggle('off', !ok);
+  talkEl.classList.toggle('off', !ok);
+  // 断了一会儿还没连上：电脑多半重启过、地址已经变了，给出扫码入口，但继续重连
+  const stale = !kicked && lostAt && Date.now() - lostAt >= RESCAN_AFTER;
+  $('rescan').classList.toggle('hide', !stale);
+  if (kicked) setState('电脑已断开', false);
+  else if (!ws || ws.readyState !== 1) setState('正在连接电脑…', false);
+  else if (!stream) setState('等待麦克风授权', false);
+  else if (!ok) setState('正在建立直连…', false);
+  else setState(active ? '录音中' : '已连接', true);
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);
+  ws.onopen = () => { lostAt = 0; prepareDecoder(); refresh(); };
+  ws.onclose = () => {
+    // 服务端把这台设备的直连、按住的键、说到一半的句子都按断线收尾，这边只清本地状态
+    dropRtc();
+    finish(null);
+    resetPad(false);
+    if (!kicked) {
+      setTimeout(connect, 1200);
+      if (!lostAt) { lostAt = Date.now(); setTimeout(refresh, RESCAN_AFTER); }
+    }
+    refresh();
+  };
+  ws.onmessage = (e) => {
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    onMessage(m);
+  };
+}
+
+function onMessage(m) {
+  switch (m.type) {
+    case 'hello':
+      ice = m.ice.map((u) => ({ urls: u }));
+      link();
+      break;
+    case 'answer': {
+      // 重建直连后，上一条 offer 的 answer 可能才到：只认最新的那条
+      const p = pc;
+      if (p && m.id === offerId) {
+        p.setRemoteDescription({ type: 'answer', sdp: m.sdp }).catch((e) => {
+          if (pc !== p) return;
+          note('直连握手失败：' + errText(e), 9000);
+          relink();
+        });
+      }
+      break;
+    }
+    case 'busy':
+      // 服务端没受理，这一句不归我：不发 stop，只把界面放回去
+      finish(null);
+      note('另一台手机正在说话，等它说完再按', 2400);
+      break;
+    case 'partial':
+      setText(m.text, false);
+      break;
+    case 'final':
+      setText(m.text || '（没有识别到内容）', !m.text);
+      hideRows();
+      break;
+    case 'rows':
+      renderRows(m.model);
+      break;
+    case 'shake': {
+      const el = rowsEl.children[m.row];
+      if (el) { el.classList.remove('shake'); void el.offsetWidth; el.classList.add('shake'); }
+      break;
+    }
+    case 'notice':
+      note(m.text);
+      break;
+    case 'error':
+      note('出错（' + m.stage + '）：' + m.message, 9000);
+      // 电脑那头没建起接收端，这条直连不会再有 answer
+      if (m.stage === 'rtc' || m.stage === 'answer') relink();
+      break;
+    case 'kicked':
+      // 电脑换了二维码（主动断开，或者这是一张旧码）：这个地址再也连不上，只剩重新扫码一条路
+      kicked = true;
+      hideRows();
+      $('lost').classList.remove('hide');
+      ws.close();
+      break;
+  }
+}
+
+// 页面就绪即建直连：ICE 收集与 DTLS 握手要几百毫秒，不能等按下那一刻再做。
+// 音轨一直开着，电脑端平时只留最近半秒当预录，按下那一刻之前的字头不会被吃掉
+async function link() {
+  if (!stream || !ice.length || !ws || ws.readyState !== 1) return;
+  dropRtc();
+  const p = new RTCPeerConnection({ iceServers: ice });
+  pc = p;
+  p.addTrack(track, stream);
+  // 触摸板要求有序可靠：按下 / 松开丢一个就是一次卡死的拖拽
+  dc = p.createDataChannel('input', { ordered: true });
+  dc.onopen = dc.onclose = refresh;
+  p.onconnectionstatechange = () => {
+    if (pc !== p) return;
+    linked = p.connectionState === 'connected';
+    if (p.connectionState === 'failed') {
+      note('直连断开，正在重建', 2400);
+      relink();
+    }
+    refresh();
+  };
+  try {
+    await p.setLocalDescription(await p.createOffer());
+    await gathered(p);
+    if (pc === p) send({ op: 'offer', id: ++offerId, sdp: p.localDescription.sdp });
+  } catch (e) {
+    if (pc === p) { note('直连建立失败：' + errText(e), 9000); relink(); }
+  }
+  refresh();
+}
+
+// 稍后重建直连。各条失败路径共用一个计时器，不会叠成几路；
+// 任何一次重建或 WS 断开都会经 dropRtc 清掉它，WS 不在时 link 本身也不动
+let relinkTimer = 0;
+function relink() {
+  if (!relinkTimer) relinkTimer = setTimeout(() => { relinkTimer = 0; link(); }, 1500);
+}
+
+// 不做 trickle：候选收集完一次性交给电脑。最多等 3 秒，够收到 STUN 反射地址
+function gathered(p) {
+  return new Promise((resolve) => {
+    if (p.iceGatheringState === 'complete') return resolve();
+    const done = () => {
+      if (p.iceGatheringState !== 'complete') return;
+      p.removeEventListener('icegatheringstatechange', done);
+      clearTimeout(t);
+      resolve();
+    };
+    const t = setTimeout(() => { p.removeEventListener('icegatheringstatechange', done); resolve(); }, 3000);
+    p.addEventListener('icegatheringstatechange', done);
+  });
+}
+
+function dropRtc() {
+  clearTimeout(relinkTimer);
+  relinkTimer = 0;
+  if (pc) pc.close();
+  pc = null; dc = null; linked = false;
+}
+
+// ---- 文字区与提示 ----
 let noteTimer = 0;
-
-// ---- 界面三态：待录 / 录音 / 已滑入取消区。颜色与文案都跟着走，别让用户猜 ----
-function setPhase(phase) {
-  const rec = phase !== 'idle';
-  const arm = phase === 'arm';
-  talkEl.classList.toggle('rec', rec);
-  talkEl.classList.toggle('arm', arm);
-  cardEl.classList.toggle('rec', phase === 'rec');
-  cardEl.classList.toggle('arm', arm);
-  tipEl.classList.toggle('show', rec);
-  tipEl.classList.toggle('arm', arm);
-  tipTextEl.textContent = arm ? '松开，取消这一句' : '上滑取消';
-  labelEl.textContent = arm ? '松开取消' : rec ? '松手结束' : '按住说话';
-  subEl.textContent = arm ? '这一句丢弃' : rec ? '松手结束' : '上滑可取消';
-  if (!rec) setPull(0);
-}
-
-// 上滑进度：0 是刚按下，1 是已经到了取消位。--p 直接驱动提示条的位移与颜色
-function setPull(p) {
-  tipEl.style.setProperty('--p', Math.max(0, Math.min(1, p)).toFixed(3));
-}
-
 function setText(text, placeholder) {
   textEl.textContent = text;
   textEl.classList.toggle('ph', !!placeholder);
 }
-
-// 电脑侧的原因要说给手机上的人听：他看不到桌面，只能靠这一行判断该怎么办
 function note(text, ms) {
   noteEl.textContent = text;
   noteEl.classList.remove('hide');
@@ -271,328 +484,572 @@ function note(text, ms) {
   noteTimer = setTimeout(() => noteEl.classList.add('hide'), ms || 7000);
 }
 
-let ws = null, ctx = null, node = null, stream = null, track = null;
-let kicked = false, busyNotice = false;
-let pc = null, rtcReady = false, iceServers = [], preferPcm = false;
-let active = false, sent = 0, t0 = 0, timer = 0;
-let resPos = 0, inRate = RATE, pcm = [];
+// ---- 多渠道候选：点一条发 commit，选中的字由电脑上屏 ----
+function hideRows() { rowsEl.classList.add('hide'); rowsEl.replaceChildren(); }
+function rowEl(r) {
+  const el = document.createElement('button');
+  el.dataset.ch = r.channel;
+  const name = document.createElement('span'), txt = document.createElement('span'), st = document.createElement('span');
+  name.className = 'name'; txt.className = 'txt'; st.className = 'st';
+  el.append(name, txt, st);
+  return el;
+}
+// 识别中快照推得很勤：渠道没变就原地改，节点不换，点击和正在抖的动画都不会被冲掉。
+// 每行是 button，键盘 Enter / Space 也能选
+function renderRows(m) {
+  if (!m || !m.rows || !m.rows.length) return hideRows();
+  rowsEl.classList.remove('hide');
+  const els = [...rowsEl.children];
+  if (els.length !== m.rows.length || m.rows.some((r, i) => els[i].dataset.ch !== r.channel)) {
+    rowsEl.replaceChildren(...m.rows.map(rowEl));
+  }
+  m.rows.forEach((r, i) => {
+    const el = rowsEl.children[i];
+    const shaking = el.classList.contains('shake');
+    el.className = `row ${r.state}` + (i === m.sel ? ' sel' : '') + (shaking ? ' shake' : '');
+    el.children[0].textContent = r.name;
+    el.children[1].textContent = r.text || '\u00a0'; // 空文字也撑住行高
+  });
+}
+rowsEl.addEventListener('click', (e) => {
+  const el = e.target.closest('.row');
+  if (el) send({ op: 'commit', channel: el.dataset.ch });
+});
 
-// 波形：worklet 每块给一个电平，rAF 把它推成柱子的高度，别在音频线程里碰 DOM
+// ---- 按住说话：上滑越过阈值进入取消区，滑回来可以反悔 ----
+let active = false, armed = false, startY = 0, t0 = 0, timer = 0, before = '', talkId = -1;
+
+function setPhase(phase) {
+  const rec = phase !== 'idle', arm = phase === 'arm';
+  talkEl.classList.toggle('rec', rec);
+  talkEl.classList.toggle('arm', arm);
+  padEl.classList.toggle('rec', phase === 'rec');
+  padEl.classList.toggle('arm', arm);
+  tipEl.classList.toggle('show', rec);
+  tipEl.classList.toggle('arm', arm);
+  tipTextEl.textContent = arm ? '松开，取消这一句' : '上滑取消';
+  labelEl.textContent = arm ? '松开取消' : '按住说话';
+  subEl.textContent = arm ? '这一句丢弃' : rec ? '松手结束' : '上滑可取消';
+  delEl.classList.toggle('off', rec);
+  if (!rec) setPull(0);
+}
+function setPull(p) { tipEl.style.setProperty('--p', clamp(p, 0, 1).toFixed(3)); }
+
+function begin() {
+  if (active) return;
+  // 另一根手指还按着退格在连删：录音中不能再删
+  delStop();
+  if (!ready()) { note(stream ? '还在建立直连，稍等一下' : '先启用麦克风', 2000); return; }
+  active = true; armed = false; t0 = Date.now();
+  before = textEl.classList.contains('ph') ? '' : textEl.textContent;
+  setPhase('rec');
+  waveOn();
+  hintEl.textContent = '0.0 秒';
+  timer = setInterval(() => { hintEl.textContent = ((Date.now() - t0) / 1000).toFixed(1) + ' 秒'; }, 100);
+  send({ op: 'start' });
+  refresh();
+}
+
+// 收尾本地状态；op 为 null 表示不通知电脑（被拒、断线时电脑那边已经知道了）
+function finish(op) {
+  if (!active) return;
+  active = false; armed = false;
+  clearInterval(timer);
+  hintEl.textContent = '';
+  waveOff();
+  setPhase('idle');
+  if (op) send({ op });
+  refresh();
+}
+
+function cancel() {
+  finish('cancel');
+  setText(before || PH, !before);
+  note('已取消这一句', 1600);
+}
+
+// 只跟按下按钮的那根手指：另一根手指碰到按钮，不能替它松手或上滑
+talkEl.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  if (active) return;
+  talkId = e.pointerId;
+  startY = e.clientY;
+  // 捕获指针：手指滑出按钮也继续跟手
+  try { talkEl.setPointerCapture(e.pointerId); } catch {}
+  begin();
+});
+const PULL = 56, HYST = 14;
+talkEl.addEventListener('pointermove', (e) => {
+  if (!active || e.pointerId !== talkId) return;
+  const dy = startY - e.clientY;
+  setPull(dy / PULL);
+  if (!armed && dy > PULL) { armed = true; setPhase('arm'); buzz(8); }
+  else if (armed && dy < PULL - HYST) { armed = false; setPhase('rec'); setPull(dy / PULL); }
+});
+// 系统抢走手势（来电、下拉通知）也按松手处理；已经滑进取消区的照样取消
+function release(e) {
+  if (e.pointerId !== talkId) return;
+  e.preventDefault();
+  talkId = -1;
+  if (armed) cancel(); else finish('stop');
+}
+talkEl.addEventListener('pointerup', release);
+talkEl.addEventListener('pointercancel', release);
+talkEl.addEventListener('contextmenu', (e) => e.preventDefault());
+// 键盘（外接键盘、读屏）：Space / Enter 按下开始、抬起结束。手指按着时不接管
+const talkKey = (e) => e.key === ' ' || e.key === 'Enter';
+talkEl.addEventListener('keydown', (e) => {
+  if (!talkKey(e)) return;
+  e.preventDefault();
+  if (!e.repeat && talkId === -1) begin();
+});
+talkEl.addEventListener('keyup', (e) => {
+  if (!talkKey(e)) return;
+  e.preventDefault();
+  if (talkId === -1) finish('stop');
+});
+talkEl.addEventListener('blur', () => { if (talkId === -1) finish('stop'); });
+
+// ---- 退格：点一下删 1 个字，按住 0.4 秒后连删 ----
+let delDelay = 0, delRepeat = 0;
+const delOnce = () => send({ op: 'backspace' });
+function delStop() { clearTimeout(delDelay); clearInterval(delRepeat); }
+delEl.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  if (active) return;
+  delOnce();
+  delDelay = setTimeout(() => { delRepeat = setInterval(delOnce, 70); }, 400);
+});
+delEl.addEventListener('pointerup', delStop);
+delEl.addEventListener('pointercancel', delStop);
+delEl.addEventListener('pointerleave', delStop);
+delEl.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// ---- 波形：AnalyserNode 取电平，rAF 推成柱子高度 ----
+let analyser = null, samples = null, raf = 0;
 const bars = [...document.querySelectorAll('#wave i')];
 const SHAPE = [.5, .8, 1, .72, 1, .84, .46];
 const hs = bars.map(() => 4);
 const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
-let level = 0, raf = 0;
-
-function rms(buf) {
-  let sum = 0, n = 0;
-  for (let i = 0; i < buf.length; i += 4) { const v = buf[i]; sum += v * v; n++; }
-  return Math.sqrt(sum / n);
-}
-
 function grow() {
-  const amp = Math.min(1, level * 7);
-  for (let i = 0; i < bars.length; i++) {
-    const target = 4 + amp * 26 * SHAPE[i];
-    hs[i] += (target - hs[i]) * .3;
-    bars[i].style.height = hs[i].toFixed(1) + 'px';
-  }
+  let sum = 0;
+  analyser.getFloatTimeDomainData(samples);
+  for (let i = 0; i < samples.length; i += 4) sum += samples[i] * samples[i];
+  const amp = Math.min(1, Math.sqrt(sum / (samples.length / 4)) * 7);
+  bars.forEach((b, i) => {
+    hs[i] += (4 + amp * 26 * SHAPE[i] - hs[i]) * .3;
+    b.style.height = hs[i].toFixed(1) + 'px';
+  });
   raf = requestAnimationFrame(grow);
 }
-
-function waveOn() { if (!calm && !raf) raf = requestAnimationFrame(grow); }
+function waveOn() { if (analyser && !calm && !raf) raf = requestAnimationFrame(grow); }
 function waveOff() {
   if (raf) cancelAnimationFrame(raf);
-  raf = 0; level = 0;
-  bars.forEach((b) => { b.style.height = '4px'; hs.fill(4); });
-}
-// 取消之后要还原按下之前的文字，不能让半句实时结果留在卡片里
-let before = '';
-
-function setState(text, ok) { stateEl.textContent = text; dotEl.className = ok ? 'on' : ''; }
-
-// ---- 多渠道候选：服务端发 rows，点一条发 commit，选中的字由电脑上屏 ----
-const CH_NAME = { doubao: '豆包', wetype: '微信', qwen: '千问', baidu: '百度', sogou: '搜狗',
-                  iflytek: '讯飞', chatterfly: 'Chatterfly', wetypeoffline: '微信离线', all: '多渠道' };
-function esc(s) { return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
-
-function renderRows(m) {
-  if (!m || !m.rows || !m.rows.length) { rowsEl.classList.add('hide'); rowsEl.innerHTML = ''; return; }
-  rowsEl.classList.remove('hide');
-  rowsEl.innerHTML = m.rows.map((r, i) =>
-    `<div class="row ${r.state}${i === m.sel ? ' sel' : ''}" data-ch="${r.channel}">` +
-      `<span class="name">${esc(CH_NAME[r.channel] || r.channel)}</span>` +
-      `<span class="txt">${esc(r.text) || '&nbsp;'}</span><span class="st"></span>` +
-    `</div>`
-  ).join('');
+  raf = 0; hs.fill(4);
+  bars.forEach((b) => { b.style.height = '4px'; });
 }
 
-rowsEl.addEventListener('pointerup', (e) => {
-  const el = e.target.closest('.row');
-  if (el && ws && ws.readyState === 1) ws.send(JSON.stringify({ op: 'commit', channel: el.dataset.ch }));
+// ---- 触摸板 ----
+// 手势与 Windows 精确式触摸板一致：
+//   单指滑动移光标，轻点单击；轻点一下紧接着按住再滑 = 按住左键拖拽，轻点两下 = 双击
+//   双指轻点右键、三指轻点中键；双指滑动滚动，松手带惯性
+// 位移换算成「电脑屏幕宽的比例」：慢慢划过整个触摸板 ≈ 半个屏幕，划得快再按速度放大。
+// x、y 用同一个基准（屏幕宽），斜着划在电脑上也是同一个角度；电脑端再乘用户设的速度倍率
+const BASE = 0.5;               // 慢速划过整块触摸板走过的屏幕宽比例
+const SCROLL = 0.6;             // 滚动：划过整块触摸板滚过的屏幕宽比例
+const SLOP = 10;                // 任一根手指离开落点超过这么多（CSS 像素）才算动了
+const TAP_MS = 300;             // 第一根落下到最后一根抬起不超过这么久才算轻点（多指落下、抬起本来就有先后）
+const DRAG_GAP = 220;           // 轻点后这么久内再按下算「点按拖拽」，所以单击要等这么久才发
+const TRAIL_MS = 80;            // 速度按最近这段轨迹算，单个采样的时间戳抖动左右不了它
+const ACCEL = [[0, .6], [.15, 1], [1.5, 2.6]];   // 手指速度（px/ms）→ 倍率，分段线性
+
+function gain(v) {
+  for (let i = 1; i < ACCEL.length; i++) {
+    const [v1, g1] = ACCEL[i], [v0, g0] = ACCEL[i - 1];
+    if (v <= v1) return g0 + (g1 - g0) * (v - v0) / (v1 - v0);
+  }
+  return ACCEL[ACCEL.length - 1][1];
+}
+
+function pad(msg) { if (ready()) dc.send(JSON.stringify(msg)); }
+
+const touches = new Map();      // pointerId → { x, y, sx, sy, el }，s 是落点
+let g = null;                   // 当前手势
+let tapWait = 0;                // 轻点后等第二下的计时器：到点没等到就发单击
+let holdTimer = 0, flushRaf = 0, pend = { mx: 0, my: 0, sx: 0, sy: 0 };
+let glide = 0;                  // 惯性滚动的 rAF
+
+// 一帧内的多次 pointermove 合成一条消息：DataChannel 不必每个触摸采样都发一包
+function queue(kind, x, y) {
+  if (kind === 'move') { pend.mx += x; pend.my += y; } else { pend.sx += x; pend.sy += y; }
+  if (!flushRaf) flushRaf = requestAnimationFrame(flush);
+}
+function flush() {
+  flushRaf = 0;
+  const lim = (v) => clamp(v, -.5, .5);
+  if (pend.mx || pend.my) pad({ k: 'move', x: lim(pend.mx), y: lim(pend.my) });
+  if (pend.sx || pend.sy) pad({ k: 'scroll', x: lim(pend.sx), y: lim(pend.sy) });
+  pend = { mx: 0, my: 0, sx: 0, sy: 0 };
+}
+
+function centroid() {
+  let x = 0, y = 0;
+  for (const t of touches.values()) { x += t.x; y += t.y; }
+  return { x: x / touches.size, y: y / touches.size };
+}
+
+function place(t) {
+  const r = padEl.getBoundingClientRect();
+  t.el.style.left = (t.x - r.left) + 'px';
+  t.el.style.top = (t.y - r.top) + 'px';
+}
+
+function record(c, at) {
+  g.trail.push({ at, x: c.x, y: c.y });
+  while (g.trail.length > 2 && at - g.trail[0].at > TRAIL_MS) g.trail.shift();
+}
+
+// 最近一段轨迹的速度（px/ms）。不到 16ms 的轨迹不可信，按静止算
+function velocity() {
+  const a = g.trail[0], b = g.trail[g.trail.length - 1];
+  const dt = b ? b.at - a.at : 0;
+  return dt < 16 ? { x: 0, y: 0 } : { x: (b.x - a.x) / dt, y: (b.y - a.y) / dt };
+}
+
+function stopGlide() { if (glide) cancelAnimationFrame(glide); glide = 0; }
+
+// 双指松开后按最后的速度继续滚，指数衰减。再次触碰立刻停
+function startGlide(vx, vy) {
+  if (Math.hypot(vx, vy) < 0.0004) return;
+  let last = performance.now();
+  const step = (now) => {
+    const dt = Math.min(32, now - last);
+    last = now;
+    const k = Math.exp(-dt / 320);
+    vx *= k; vy *= k;
+    if (Math.hypot(vx, vy) < 0.00005 || !ready()) { glide = 0; return; }
+    queue('scroll', vx * dt, vy * dt);
+    glide = requestAnimationFrame(step);
+  };
+  glide = requestAnimationFrame(step);
+}
+
+// 点按拖拽：第二下按住后一动、或按住不放超过 TAP_MS，才按下左键。
+// 按下之前那一点位移丢掉——左键要落在第一下点的位置上
+function enterDrag() {
+  if (!g || g.mode !== 'idle' || !g.again || g.max !== 1) return;
+  clearTimeout(holdTimer);
+  g.mode = 'drag';
+  g.again = false;
+  padEl.classList.add('drag');
+  pad({ k: 'down', b: 'left' });
+  buzz(10);
+}
+
+// 手势结束。sendUp 为 false 时只清本地：断线时电脑会替这台设备放开按住的键
+function endGesture(sendUp) {
+  clearTimeout(holdTimer);
+  if (g && g.mode === 'drag' && sendUp) { flush(); pad({ k: 'up', b: 'left' }); }
+  padEl.classList.remove('drag');
+  for (const t of touches.values()) t.el.remove();
+  touches.clear();
+  g = null;
+}
+
+// 断线、切走页面：手势、欠着的单击、惯性全部作废
+function resetPad(sendUp) {
+  clearTimeout(tapWait);
+  tapWait = 0;
+  endGesture(sendUp);
+  stopGlide();
+}
+
+padEl.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  if (!ready()) return;
+  padEl.classList.add('touched');
+  stopGlide();
+  try { padEl.setPointerCapture(e.pointerId); } catch {}
+  const el = document.createElement('i');
+  el.className = 'finger';
+  padEl.appendChild(el);
+  const t = { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, el };
+  touches.set(e.pointerId, t);
+  place(t);
+
+  if (!g) {
+    g = { mode: 'idle', t0: e.timeStamp, max: 1, w: padEl.clientWidth, moved: false, frozen: false,
+          again: false, flick: null, last: centroid(), trail: [] };
+    if (tapWait) {
+      // 上一下轻点的单击还欠着：这一下可能是拖拽，也可能是双击的第二下
+      clearTimeout(tapWait);
+      tapWait = 0;
+      g.again = true;
+      holdTimer = setTimeout(enterDrag, TAP_MS);
+    }
+    return;
+  }
+  // 加了手指：重心跳变不算位移，轨迹从头记
+  g.max = Math.max(g.max, touches.size);
+  g.last = centroid();
+  g.trail = [];
+  if (g.mode === 'drag') return;
+  if (g.again) {
+    // 变成了多指手势：欠着的单击照发，这一下不再是拖拽
+    g.again = false;
+    clearTimeout(holdTimer);
+    pad({ k: 'click', b: 'left' });
+  }
+  // 按新的手指数重新认手势；已经动过的不会再算轻点
+  g.mode = 'idle';
 });
 
-function connect() {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);
-  ws.binaryType = 'arraybuffer';
-  ws.onopen = () => setState('已连接', true);
-  ws.onclose = () => {
-    rtcReady = false;
-    if (kicked) { setState('电脑已断开，请重新扫码', false); return; }
-    setState('连接断开，重试中', false);
-    setTimeout(connect, 1200);
-  };
-  ws.onerror = () => setState('连接出错', false);
-  ws.onmessage = async (event) => {
-    let msg; try { msg = JSON.parse(event.data); } catch { return; }
-    if (msg.type === 'hello') {
-      iceServers = (msg.ice || []).map((u) => ({ urls: u }));
-      if (stream) await setupRtc();
-    } else if (msg.type === 'answer') {
-      await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
-    } else if (msg.type === 'partial') {
-      setText(msg.text, false);
-    } else if (msg.type === 'stats') {
-      hintEl.textContent = msg.packets
-        ? `${msg.packets} 包 · ${msg.seconds.toFixed(1)} 秒 · 丢包 ${msg.loss.toFixed(1)}%`
-        : '';
-    } else if (msg.type === 'started') {
-      // 服务端确认这一句归我：把上一次「被别的设备占着」的提示清掉
-      if (busyNotice) { busyNotice = false; setText('', true); }
-      setState('录音中', true);
-    } else if (msg.type === 'busy') {
-      busyNotice = true;
-      setText('另一台设备正在说话，松手后重按', true);
-    } else if (msg.type === 'prefer') {
-      // 服务端判定这条链路丢包太多，后面的句子改走回落
-      preferPcm = true;
-      setState('回落通道', false);
-      note('这条链路丢包偏多（' + (msg.reason || '') + '），已切到回落通道，后面的句子会稍慢一点但更准。');
-    } else if (msg.type === 'final') {
-      setText(msg.text || '（没有识别到内容）', !msg.text);
-      // 提交了某条候选或单渠道定稿：候选列表的使命结束
-      rowsEl.classList.add('hide');
-    } else if (msg.type === 'rows') {
-      renderRows(msg.model);
-    } else if (msg.type === 'shake') {
-      const el = rowsEl.children[msg.row];
-      if (el) { el.classList.remove('shake'); void el.offsetWidth; el.classList.add('shake'); }
-    } else if (msg.type === 'kicked') {
-      kicked = true;
-      setText('电脑端已断开连接，请重新扫码。', true);
-      rowsEl.classList.add('hide');
-      setState('已断开', false);
-      ws.close();
-    } else if (msg.type === 'notice') {
-      note(msg.text);
-    } else if (msg.type === 'error') {
-      setText('出错（' + msg.stage + '）：' + msg.message, true);
-      rowsEl.classList.add('hide');
-    }
-  };
-}
-connect();
+padEl.addEventListener('pointermove', (e) => {
+  const t = touches.get(e.pointerId);
+  if (!t || !g) return;
+  t.x = e.clientX; t.y = e.clientY;
+  place(t);
+  // 多指里已经抬起一根：剩下的手指不再产出动作，也不再算「动了」。抬手时手指会滚、会回弹，
+  // 不挡住的话滚动会被拉回去、双指轻点会变成光标跳一下
+  if (g.frozen) return;
+  if (Math.hypot(t.x - t.sx, t.y - t.sy) > SLOP) g.moved = true;
 
+  const c = centroid();
+  const dx = c.x - g.last.x, dy = c.y - g.last.y;
+  g.last = c;
+  record(c, e.timeStamp);
+
+  if (g.mode === 'idle') {
+    if (!g.moved) return;
+    if (g.again) return enterDrag();
+    // 三指以上不定义动作，只当作噪声忽略
+    g.mode = touches.size === 1 ? 'move' : touches.size === 2 ? 'scroll' : 'none';
+  }
+  if (g.mode === 'move' || g.mode === 'drag') {
+    const v = velocity();
+    const k = BASE * gain(Math.hypot(v.x, v.y)) / g.w;
+    queue('move', dx * k, dy * k);
+  } else if (g.mode === 'scroll') {
+    const k = SCROLL / g.w;
+    queue('scroll', dx * k, dy * k);
+  }
+});
+
+function lift(e) {
+  const t = touches.get(e.pointerId);
+  if (!t || !g) return;
+  t.el.remove();
+  touches.delete(e.pointerId);
+  if (touches.size) {
+    if (g.mode === 'drag') {
+      g.last = centroid();
+      g.trail = [];
+    } else if (!g.frozen) {
+      // 惯性取第一根手指抬起前的速度，之后的轨迹已经是抬手动作了
+      g.frozen = true;
+      const last = g.trail[g.trail.length - 1];
+      if (g.mode === 'scroll' && last && e.timeStamp - last.at < 60) {
+        const v = velocity(), k = SCROLL / g.w;
+        g.flick = { x: v.x * k, y: v.y * k };
+      }
+    }
+    return;
+  }
+
+  const cancelled = e.type === 'pointercancel';
+  const tap = !g.moved && !cancelled && e.timeStamp - g.t0 < TAP_MS;
+  if (g.mode !== 'drag') {
+    if (g.again && !tap) pad({ k: 'click', b: 'left' });
+    if (tap && g.max > 1) {
+      pad({ k: 'click', b: g.max === 2 ? 'right' : 'middle' });
+    } else if (tap && g.again) {
+      // 双击：两次单击挨着发，系统按双击间隔认出来
+      pad({ k: 'click', b: 'left' });
+      pad({ k: 'click', b: 'left' });
+    } else if (tap) {
+      tapWait = setTimeout(() => { tapWait = 0; pad({ k: 'click', b: 'left' }); }, DRAG_GAP);
+    } else if (g.mode === 'scroll' && !cancelled && g.flick) {
+      flush();
+      startGlide(g.flick.x, g.flick.y);
+    }
+    if (tap) buzz(6);
+  }
+  endGesture(true);
+}
+padEl.addEventListener('pointerup', lift);
+padEl.addEventListener('pointercancel', lift);
+padEl.addEventListener('contextmenu', (e) => e.preventDefault());
+
+function buzz(ms) { if (navigator.vibrate) navigator.vibrate(ms); }
+
+// 切走页面：说到一半的照常定稿，拖拽中的键放开
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) return;
+  finish('stop');
+  resetPad(true);
+  stopScan();
+});
+
+// ---- 麦克风 ----
+let audioCtx = null, source = null;
 async function startAudio() {
   stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       channelCount: 1,
-      // 与 PC 端裸麦保持一致：浏览器默认的降噪会吃掉小声说话的开头
+      // 浏览器默认的降噪会吃掉小声说话的开头，识别引擎自己会处理噪声
       echoCancellation: false,
       noiseSuppression: false,
       autoGainControl: true,
     },
   });
   track = stream.getAudioTracks()[0];
-  track.enabled = false;
-  try { ctx = new AudioContext({ sampleRate: RATE }); }
-  catch { ctx = new AudioContext(); }
-  if (ctx.state === 'suspended') await ctx.resume();
-  inRate = ctx.sampleRate;
-
-  const code = `
-    class Tap extends AudioWorkletProcessor {
-      process(inputs) {
-        const ch = inputs[0] && inputs[0][0];
-        if (ch) this.port.postMessage(new Float32Array(ch));
-        return true;
-      }
-    }
-    registerProcessor('tap', Tap);`;
-  const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
-  await ctx.audioWorklet.addModule(url);
-
-  node = new AudioWorkletNode(ctx, 'tap');
-  node.port.onmessage = (e) => { level = rms(e.data); feed(e.data); };
-  const src = ctx.createMediaStreamSource(stream);
-  const mute = ctx.createGain();
-  mute.gain.value = 0;
-  src.connect(node).connect(mute).connect(ctx.destination);
-
-  if (iceServers.length) await setupRtc();
+  // 麦克风被系统收走（别的应用占用、权限撤销）：直连里的音轨已经哑了，得重新授权
+  track.onended = () => {
+    finish('stop');
+    dropRtc();
+    stream = track = null;
+    $('gate').querySelector('p').textContent = '麦克风被系统关闭了，请重新启用。';
+    $('gate').classList.remove('hide');
+    refresh();
+  };
+  // 重新授权时复用同一个 AudioContext，只换输入源：浏览器对同时存在的 context 数量有上限
+  audioCtx = audioCtx || new AudioContext();
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+  if (source) source.disconnect();
+  if (!analyser) {
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    samples = new Float32Array(analyser.fftSize);
+  }
+  source = audioCtx.createMediaStreamSource(stream);
+  source.connect(analyser);
+  link();
 }
 
-// 页面加载即建连：ICE 收集与 DTLS 握手要几百毫秒，不能等按下那一刻再做
-async function setupRtc() {
-  if (pc || !stream) return;
+// ---- 扫码重连 ----
+// 电脑每次启动、每次断开都会换地址，重连只能靠新二维码。
+// 浏览器自带的 BarcodeDetector 在 iOS 和多数安卓浏览器上都没有，所以自己解：
+// 相机画面裁出取景框、缩小后交给 Worker 里的 jsQR。解码不占主线程，取景画面和「取消」始终跟手；
+// 上一帧解完才送下一帧，快的手机扫得勤，慢的手机也不会堆积。
+// 解码库（约 130KB）在连上电脑时就取回来、和解码循环一起装进 Worker：需要扫码的时候，
+// 往往正是电脑重启、旧地址已经失效的时候，那时再去取一定取不到
+const scanEl = $('scan'), videoEl = scanEl.querySelector('video'), scanMsgEl = $('scanmsg');
+const SCAN_SIDE = 360;          // 取景框缩到这么大再解：码占框内大半时每个模块仍有五六个像素，解一帧桌面约 12ms
+const canvas = document.createElement('canvas');
+const ctx2d = canvas.getContext('2d', { willReadFrequently: true });
+let scanning = false, scanStream = null, worker = null, loading = null;
+let inFlight = false;           // 有一帧在 Worker 里。取消后马上重开扫码时，旧循环和新循环靠它合成一条
+let scanSeq = 0;                // 每次开、关扫码都加一：await 回来对不上号，说明这次扫码已经作废
+
+// 只认本服务的二维码：随便一张码里的网址不能把页面带走
+function ourUrl(text) {
+  let u;
+  try { u = new URL(text); } catch { return null; }
+  const host = u.origin === location.origin || (u.protocol === 'https:' && u.hostname.endsWith('.trycloudflare.com'));
+  const ok = host && u.pathname === '/' && /^[0-9a-f]{32}$/.test(u.searchParams.get('t') || '');
+  return ok ? u.href : null;
+}
+
+const DECODE = `
+onmessage = (e) => {
+  const { data, n } = e.data;
+  const code = jsQR(new Uint8ClampedArray(data), n, n, { inversionAttempts: 'dontInvert' });
+  postMessage(code ? code.data : null);
+};`;
+
+// 取一次就够：Worker 建好之后不再依赖网络。没取到就等下次连上再取
+function prepareDecoder() {
+  if (worker) return Promise.resolve();
+  loading = loading || fetch('/jsqr.js')
+    .then((r) => { if (!r.ok) throw new Error(r.status); return r.text(); })
+    .then((lib) => {
+      const url = URL.createObjectURL(new Blob([lib, DECODE], { type: 'text/javascript' }));
+      worker = new Worker(url);
+      URL.revokeObjectURL(url);
+      worker.onmessage = onDecoded;
+      // 某一帧解码抛错就跳过它，不能让循环停在这里
+      worker.onerror = (e) => { e.preventDefault(); onDecoded({ data: null }); };
+    })
+    .catch(() => {})
+    .finally(() => { loading = null; });
+  return loading;
+}
+
+function onDecoded(e) {
+  inFlight = false;
+  if (!scanning) return;
+  const url = e.data && ourUrl(e.data);
+  if (url) { buzz(15); stopScan(); location.replace(url); return; }
+  if (e.data) scanMsgEl.textContent = '这不是 VoiceKey 的二维码';
+  requestAnimationFrame(next);
+}
+
+// 取画面正中的正方形（取景框就在那儿），缩到 SCAN_SIDE 送去解
+function next() {
+  if (!scanning || inFlight) return;
+  const w = videoEl.videoWidth, h = videoEl.videoHeight;
+  if (!w || !h) return requestAnimationFrame(next);
+  const side = Math.min(w, h), n = Math.min(side, SCAN_SIDE);
+  canvas.width = canvas.height = n;
+  ctx2d.drawImage(videoEl, (w - side) / 2, (h - side) / 2, side, side, 0, 0, n, n);
+  const { data } = ctx2d.getImageData(0, 0, n, n);
+  inFlight = true;
+  worker.postMessage({ data: data.buffer, n }, [data.buffer]);
+}
+
+function stopScan() {
+  scanning = false;
+  scanSeq++;
+  if (scanStream) scanStream.getTracks().forEach((t) => t.stop());
+  scanStream = null;
+  videoEl.srcObject = null;
+  scanEl.classList.add('hide');
+}
+
+async function startScan() {
+  if (scanning) return;
+  scanning = true;
+  const seq = ++scanSeq;
+  scanEl.classList.remove('hide');
+  scanMsgEl.textContent = '对准电脑上的二维码';
   try {
-    pc = new RTCPeerConnection({ iceServers });
-    pc.addTrack(track, stream);
-    pc.onconnectionstatechange = () => {
-      const s = pc.connectionState;
-      rtcReady = s === 'connected';
-      if (s === 'connected') setState('WebRTC 已连接', true);
-      if (s === 'failed' || s === 'disconnected') { rtcReady = false; setState('WebRTC 断开，改用回落通道', false); }
-    };
-    await pc.setLocalDescription(await pc.createOffer());
-    await new Promise((resolve) => {
-      if (pc.iceGatheringState === 'complete') return resolve();
-      const done = () => { if (pc.iceGatheringState === 'complete') { pc.removeEventListener('icegatheringstatechange', done); resolve(); } };
-      pc.addEventListener('icegatheringstatechange', done);
-      setTimeout(resolve, 3000);
-    });
-    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ op: 'offer', sdp: pc.localDescription.sdp }));
-    setState('正在建立 WebRTC', false);
+    const [stream] = await Promise.all([
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false }),
+      prepareDecoder(),
+    ]);
+    // 等相机授权的时候用户可能已经取消、甚至又重开了一次：这路流不归这次扫码，关掉
+    if (seq !== scanSeq) return stream.getTracks().forEach((t) => t.stop());
+    scanStream = stream;
+    videoEl.srcObject = stream;
+    await videoEl.play();
+    if (seq !== scanSeq) return;
+    // 解码库一次都没取到：页面打开后没连上过电脑，或者连上了但取 /jsqr.js 失败
+    if (!worker) return (scanMsgEl.textContent = '扫码组件没能加载，请用手机相机扫描电脑上的二维码');
+    next();
   } catch (e) {
-    setText('WebRTC 建立失败：' + (e && e.message ? e.message : e), true);
+    if (seq === scanSeq) scanMsgEl.textContent = '打不开相机：' + errText(e);
   }
 }
 
-// 本次按住走哪条路：WebRTC 可用且没被判定为不可靠时才用它
-function useRtc() { return rtcReady && !preferPcm; }
+$('rescan').onclick = $('lostscan').onclick = startScan;
+$('scancancel').onclick = stopScan;
 
-// 回落路径专用：归一到 16k（整数倍取平均，其余线性插值）
-function feed(input) {
-  if (!active || useRtc()) return;
-  let out;
-  if (inRate === RATE) {
-    out = input;
-  } else {
-    out = [];
-    const step = inRate / RATE;
-    while (resPos + 1 < input.length) {
-      const i = Math.floor(resPos), f = resPos - i;
-      out.push(input[i] * (1 - f) + input[i + 1] * f);
-      resPos += step;
-    }
-    resPos -= input.length;
-  }
-  for (let i = 0; i < out.length; i++) {
-    const s = Math.max(-1, Math.min(1, out[i]));
-    pcm.push(s < 0 ? s * 0x8000 : s * 0x7fff);
-  }
-  while (pcm.length >= FRAME) {
-    const chunk = pcm.slice(0, FRAME);
-    pcm = pcm.slice(FRAME);
-    const buf = new ArrayBuffer(FRAME * 2);
-    const view = new DataView(buf);
-    for (let i = 0; i < FRAME; i++) view.setInt16(i * 2, chunk[i], true);
-    if (ws && ws.readyState === 1) { ws.send(buf); sent += FRAME * 2; }
-  }
-}
-
-function begin() {
-  if (!ctx || active) return;
-  active = true; sent = 0; pcm = []; resPos = 0; t0 = Date.now();
-  before = textEl.classList.contains('ph') ? '' : textEl.textContent;
-  const rtc = useRtc();
-  setPhase('rec');
-  setPull(0);
-  waveOn();
-  delEl.classList.add('off');
-  hintEl.textContent = rtc ? 'WebRTC' : '回落通道';
-  timer = setInterval(() => {
-    hintEl.textContent = (useRtc() ? 'WebRTC · ' : '回落 · ') + ((Date.now() - t0) / 1000).toFixed(1) + ' 秒';
-  }, 100);
-  if (rtc && track) track.enabled = true;
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ op: 'start' }));
-}
-
-function release() {
-  if (!active) return;
-  active = false;
-  clearInterval(timer);
-  waveOff();
-  if (track) track.enabled = false;
-  setPhase('idle');
-  delEl.classList.remove('off');
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ op: 'stop' }));
-}
-
-// 滑进取消区再松手：这一句整段丢弃，电脑端不跑识别也不上屏
-function cancel() {
-  if (!active) return;
-  active = false;
-  clearInterval(timer);
-  waveOff();
-  if (track) track.enabled = false;
-  setPhase('idle');
-  delEl.classList.remove('off');
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ op: 'cancel' }));
-  setText(before || '按住下方按钮说话，电脑端会收到音频。', !before);
-  note('已取消这一句', 1600);
-}
-
+// 等授权期间按钮禁用：连点会并发开出好几路麦克风
 $('enable').onclick = async () => {
+  $('enable').disabled = true;
   try {
     await startAudio();
     $('gate').classList.add('hide');
   } catch (e) {
-    $('gate').querySelector('p').textContent = '麦克风打开失败：' + (e && e.message ? e.message : e);
+    $('gate').querySelector('p').textContent = '麦克风打开失败：' + errText(e);
   }
+  $('enable').disabled = false;
+  refresh();
 };
 
-// ---- 按住说话：上滑越过阈值进入取消区，滑回来可以反悔 ----
-const PULL = 56, HYST = 14;
-let startY = 0, armed = false;
-
-talkEl.addEventListener('pointerdown', (e) => {
-  e.preventDefault();
-  startY = e.clientY;
-  armed = false;
-  // 捕获指针，手指滑出按钮范围也继续跟手
-  try { talkEl.setPointerCapture(e.pointerId); } catch {}
-  begin();
-});
-talkEl.addEventListener('pointermove', (e) => {
-  if (!active) return;
-  const dy = startY - e.clientY;            // 向上为正
-  setPull(dy / PULL);
-  if (!armed && dy > PULL) { armed = true; setPhase('arm'); vibrate(); }
-  else if (armed && dy < PULL - HYST) { armed = false; setPhase('rec'); setPull(dy / PULL); }
-});
-talkEl.addEventListener('pointerup', (e) => {
-  e.preventDefault();
-  const drop = armed;
-  armed = false;
-  if (drop) cancel(); else release();
-});
-talkEl.addEventListener('pointercancel', () => { armed = false; release(); });
-talkEl.addEventListener('contextmenu', (e) => e.preventDefault());
-window.addEventListener('blur', () => { armed = false; release(); });
-document.addEventListener('visibilitychange', () => { if (document.hidden) { armed = false; release(); } });
-
-function vibrate() { if (navigator.vibrate) navigator.vibrate(8); }
-
-// 退格：点一下删 1 个字，按住 0.4 秒后连删。往电脑的前台窗口发真实退格键
-let delDelay = 0, delRepeat = 0;
-function delOnce() {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ op: 'backspace', n: 1 }));
-}
-delEl.addEventListener('pointerdown', (e) => {
-  e.preventDefault();
-  if (active) return;
-  delOnce();
-  delDelay = setTimeout(() => { delRepeat = setInterval(delOnce, 80); }, 420);
-});
-function delStop() { clearTimeout(delDelay); clearInterval(delRepeat); }
-delEl.addEventListener('pointerup', delStop);
-delEl.addEventListener('pointercancel', delStop);
-delEl.addEventListener('pointerleave', delStop);
-delEl.addEventListener('contextmenu', (e) => e.preventDefault());
-
 setPhase('idle');
+connect();
+refresh();
 </script>
 </body>
 </html>

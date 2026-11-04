@@ -59,6 +59,7 @@ pub enum Choice {
 }
 
 /// 多渠道候选面板的全部状态
+#[derive(Default)]
 pub struct Picker {
     rows: Vec<Row>,
     segs: Vec<Segments>,
@@ -83,9 +84,9 @@ impl Picker {
                 let skip = !ready(ch);
                 Row {
                     channel: ch,
+                    name: ch.title(),
                     text: if skip { "离线模型未下载，已跳过".into() } else { String::new() },
                     state: if skip { RowState::Skip } else { RowState::Listen },
-                    ms: None,
                 }
             })
             .collect();
@@ -133,33 +134,43 @@ impl Picker {
         }
     }
 
-    /// 某一行定稿。返回需要把焦点挪过去的目标（没有就 None）。
+    /// 某一行定稿，必要时把焦点挪过去（新焦点从 [`Picker::sel`] 读）。
     ///
     /// 规则：用户没手选过、或当前焦点那条已经废了，就自动落到第一条成功的行上。
-    pub fn on_done(&mut self, ch: Channel, seg: usize, res: Result<String, String>, ms: Option<u64>) -> Option<usize> {
-        let i = self.index_of(ch)?;
+    /// 任何一段失败，这一行就算失败：残缺的半句不该作为候选被选上屏
+    pub fn on_done(&mut self, ch: Channel, seg: usize, res: Result<String, String>) {
+        let Some(i) = self.index_of(ch) else { return };
         self.segs[i].done(seg, res, false);
         let text = self.segs[i].text();
         if !self.segs[i].finished() {
             self.rows[i].text = text;
-            return None;
+            return;
         }
-        if !text.is_empty() {
-            self.rows[i].text = text;
-            self.rows[i].state = RowState::Final;
-            self.rows[i].ms = Some(ms.unwrap_or(0));
-        } else {
-            self.rows[i].text = self.segs[i].error.clone().unwrap_or_else(|| "没有识别到内容".into());
-            self.rows[i].state = RowState::Error;
+        match self.segs[i].error.clone() {
+            Some(e) => {
+                self.rows[i].text = e;
+                self.rows[i].state = RowState::Error;
+            }
+            None if text.is_empty() => {
+                self.rows[i].text = "没有识别到内容".into();
+                self.rows[i].state = RowState::Error;
+            }
+            None => {
+                self.rows[i].text = text;
+                self.rows[i].state = RowState::Final;
+            }
         }
 
         let current = self.rows[self.sel].state;
         let stale = !self.user_picked || matches!(current, RowState::Error | RowState::Skip);
         if self.rows[i].state == RowState::Final && stale && current != RowState::Final {
             self.sel = i;
-            return Some(i);
         }
-        None
+    }
+
+    /// 打断或取消之后：清空候选，手机上的列表随之收起
+    pub fn clear(&mut self) {
+        *self = Self::default();
     }
 
     /// 松手：所有还在听的行转入等待定稿
@@ -192,9 +203,15 @@ impl Picker {
         self.rows.get(i).map(|r| (r.text.clone(), r.channel))
     }
 
-    /// 焦点所在行的正文与渠道（超时打断时补写用）
-    pub fn selected(&self) -> Option<(String, Channel)> {
-        self.take(self.sel)
+    /// 打断时留下哪一条：焦点行已定稿就用它，否则取排在最前的已定稿行。
+    /// 识别中、失败的行一律不算——半句话或报错文字不该被打进输入框
+    pub fn settled(&self) -> Option<(String, Channel)> {
+        let done = |r: &&Row| r.state == RowState::Final && !r.text.is_empty();
+        self.rows
+            .get(self.sel)
+            .filter(done)
+            .or_else(|| self.rows.iter().find(done))
+            .map(|r| (r.text.clone(), r.channel))
     }
 
     /// 所有行都不再「在识别中」——超时定时器可以撤了
@@ -242,7 +259,7 @@ mod tests {
         assert_eq!(p.sel(), 1);
         // 沿用上次选择也算「表过态」：别的行定稿不该把焦点抢走
         let seg = p.start_round()[0].1;
-        p.on_done(Channel::Doubao, seg, Ok("别的渠道".into()), None);
+        p.on_done(Channel::Doubao, seg, Ok("别的渠道".into()));
         assert_eq!(p.sel(), 1, "上次选择的行不该被自动切换顶掉");
     }
 
@@ -252,7 +269,7 @@ mod tests {
         let targets = p.start_round();
         let seg = targets[0].1;
         // 第二行先成功：焦点应当跟着走
-        assert_eq!(p.on_done(Channel::Qwen, seg, Ok("你好".into()), Some(120)), Some(1));
+        p.on_done(Channel::Qwen, seg, Ok("你好".into()));
         assert_eq!(p.sel(), 1);
     }
 
@@ -261,11 +278,11 @@ mod tests {
         let mut p = picker(vec![Channel::Doubao, Channel::Qwen]);
         let targets = p.start_round();
         let seg = targets[0].1;
-        p.on_done(Channel::Doubao, seg, Ok("第一行".into()), None);
+        p.on_done(Channel::Doubao, seg, Ok("第一行".into()));
         assert_eq!(p.sel(), 0);
         // 用户手点第一行之后，第二行定稿不该把焦点抢走
         assert_eq!(p.choose(0), Choice::Commit);
-        p.on_done(Channel::Qwen, seg, Ok("第二行".into()), None);
+        p.on_done(Channel::Qwen, seg, Ok("第二行".into()));
         assert_eq!(p.sel(), 0, "用户选过的行不该被自动切换顶掉");
     }
 
@@ -273,10 +290,48 @@ mod tests {
     fn failed_row_shakes_instead_of_committing() {
         let mut p = picker(vec![Channel::Doubao]);
         let targets = p.start_round();
-        p.on_done(Channel::Doubao, targets[0].1, Err("超时".into()), None);
+        p.on_done(Channel::Doubao, targets[0].1, Err("超时".into()));
         assert_eq!(p.rows()[0].state, RowState::Error);
         assert_eq!(p.choose(0), Choice::Shake);
         assert_eq!(p.take(0).unwrap().0, "超时");
+    }
+
+    /// 前一段成功、后一段失败：整行算失败，不能把半句话当候选
+    #[test]
+    fn partially_failed_row_is_not_selectable() {
+        let mut p = picker(vec![Channel::Doubao, Channel::Qwen]);
+        let a = p.start_round()[0].1;
+        p.release();
+        let b = p.start_round()[0].1;
+        p.on_done(Channel::Doubao, a, Ok("第一段".into()));
+        p.on_partial(Channel::Doubao, b, "半".into());
+        p.on_done(Channel::Doubao, b, Err("网络".into()));
+        assert_eq!(p.sel(), 0, "失败的行不该抢焦点");
+        assert_eq!(p.rows()[0].state, RowState::Error);
+        assert_eq!(p.choose(0), Choice::Shake);
+        // 打断时也不该留下它
+        assert!(p.settled().is_none());
+    }
+
+    #[test]
+    fn empty_result_is_an_error_row() {
+        let mut p = picker(vec![Channel::Doubao]);
+        let seg = p.start_round()[0].1;
+        p.on_done(Channel::Doubao, seg, Ok(String::new()));
+        assert_eq!(p.rows()[0].state, RowState::Error);
+        assert_eq!(p.rows()[0].text, "没有识别到内容");
+    }
+
+    #[test]
+    fn settled_prefers_focused_final_row() {
+        let mut p = picker(vec![Channel::Doubao, Channel::Qwen]);
+        let seg = p.start_round()[0].1;
+        p.on_done(Channel::Doubao, seg, Ok("一".into()));
+        p.on_done(Channel::Qwen, seg, Ok("二".into()));
+        assert_eq!(p.choose(1), Choice::Commit);
+        assert_eq!(p.settled(), Some(("一".into(), Channel::Doubao)), "Commit 不移动焦点");
+        p.clear();
+        assert!(p.rows().is_empty());
     }
 
     #[test]
@@ -294,7 +349,7 @@ mod tests {
         p.release();
         assert_eq!(p.rows()[0].state, RowState::Wait);
         assert!(!p.all_settled());
-        p.on_done(Channel::Doubao, 0, Ok("好".into()), None);
+        p.on_done(Channel::Doubao, 0, Ok("好".into()));
         assert!(p.all_settled());
     }
 

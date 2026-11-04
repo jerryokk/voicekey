@@ -1,12 +1,22 @@
 <script lang="ts">
-  import { app, disconnect, refreshRemote } from "../lib/store.svelte";
+  import { onMount } from "svelte";
+  import { app, disconnect, retry, link } from "../lib/store.svelte";
   import { CH } from "../lib/api";
   import Card from "../lib/ui/Card.svelte";
   import StatusDot from "../lib/ui/StatusDot.svelte";
 
   const remote = $derived(app.remote);
   const last = $derived(app.last);
-  const failed = $derived(remote.state === "failed" || remote.lanOnly === true);
+  const status = $derived(link(remote));
+  const failed = $derived(status.dot === "err");
+  const ready = $derived(status.dot === "ok");
+
+  /** 「几分钟前」要跟着走：每 30 秒推一下时钟 */
+  let now = $state(Date.now());
+  onMount(() => {
+    const t = setInterval(() => (now = Date.now()), 30_000);
+    return () => clearInterval(t);
+  });
 
   let copied = $state(false);
   let busy = $state(false);
@@ -20,15 +30,17 @@
     } catch {}
   }
 
+  /** 失败原因由 disconnect 交给 app.error，在页面顶部显示 */
   async function cut() {
     busy = true;
     await disconnect();
     busy = false;
   }
 
-  function ago(ts: number) {
-    const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
-    if (s < 60) return `${s} 秒前`;
+  function ago(ts: number, now: number) {
+    const s = Math.max(0, Math.floor(now / 1000 - ts));
+    // 时钟 30 秒才走一格，报秒数会失真
+    if (s < 60) return "刚刚";
     if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
     return `${Math.floor(s / 3600)} 小时前`;
   }
@@ -43,14 +55,14 @@
 
 <div class="status">
   <div class="head">
-    <StatusDot state={failed ? "err" : remote.qr ? "ok" : "busy"} pulse={!failed && !remote.qr} />
-    <b>{failed ? (remote.lanOnly ? "公网隧道未建立" : "手机接入启动失败") : remote.qr ? "可以扫码连接" : "正在申请公网地址"}</b>
+    <StatusDot state={status.dot} pulse={status.dot === "busy"} />
+    <b>{status.text}</b>
     {#if app.s}<span class="pill">{CH[app.s.channel].short}</span>{/if}
   </div>
   <p class="detail">
     {#if failed}
-      {remote.error ?? (remote.lanOnly ? "公网隧道没有建立，手机暂时连不上。" : "未知错误")}
-    {:else if remote.qr}
+      {remote.error ?? "原因未知"}
+    {:else if ready}
       地址每次启动都会变；断开手机后旧二维码立即失效。
     {:else}
       首次约需十秒，请稍候…
@@ -58,7 +70,7 @@
   </p>
 </div>
 
-{#if remote.qr && !failed}
+{#if ready}
   <Card title="扫码配对" sub="手机相机扫一下，页面会请求一次麦克风权限">
     <div class="qrWrap">
       <div class="qr">{@html remote.qr}</div>
@@ -72,22 +84,21 @@
       </div>
     </div>
   </Card>
-{:else if !failed}
+{:else if failed}
   <Card>
-    <p class="wait"><span class="spin"></span> 正在建立隧道…</p>
-    <button class="btn" onclick={() => refreshRemote()}>刷新</button>
+    <p class="wait">没有可用的公网地址，手机暂时无法连接。重试会重新拉起服务，地址也会换一个。</p>
+    <button class="btn pri" onclick={retry}>重试</button>
   </Card>
 {:else}
   <Card>
-    <p class="wait">没有可用的公网地址，手机暂时无法连接。</p>
-    <button class="btn" onclick={() => refreshRemote()}>重新检测</button>
+    <p class="wait"><span class="spin"></span> 正在建立隧道…</p>
   </Card>
 {/if}
 
 {#if last}
   <Card title="最近一句">
     <p class="last">{last.text}</p>
-    <p class="meta">{clock} · {CH[last.channel].short} · {ago(last.at)}</p>
+    <p class="meta">{clock} · {CH[last.channel].short} · {ago(last.at, now)}</p>
   </Card>
 {/if}
 
@@ -96,11 +107,11 @@
     <li><b>扫码</b><span>手机相机对准二维码</span></li>
     <li><b>点好光标</b><span>在电脑上点一下要输入的位置</span></li>
     <li><b>按住说话</b><span>松手后文字自动打进去</span></li>
+    <li><b>当触摸板</b><span>手机上半区滑动移光标，轻点单击，双指滚动</span></li>
   </ol>
 </Card>
 
 <style>
-  .sub { margin: 4px 0 16px; color: var(--fg-2); }
   .status {
     background: var(--card); border: 1px solid var(--line); border-radius: var(--r-lg);
     padding: 12px 16px; margin-bottom: 12px;

@@ -1,11 +1,12 @@
+//! 用户设置：渠道、输出方式、触摸板速度、外观，存在数据目录的 settings.json。
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use voicekey_core::util::data_file;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Channel {
-    #[default]
     Doubao,
     Wetype,
     Qwen,
@@ -19,6 +20,7 @@ pub enum Channel {
 }
 
 impl Channel {
+    /// 显示名，手机上的候选行用它
     pub fn title(self) -> &'static str {
         match self {
             Channel::Doubao => "豆包输入法",
@@ -48,7 +50,7 @@ impl Channel {
     }
 
     /// 多渠道默认勾选的渠道：**不含**微信离线——它要先下 100MB 模型，
-    /// 不该默认参与对比。默认值与「列表太短时的兜底」都用这一份，避免两处定义漂移。
+    /// 不该默认参与对比。默认值与「勾选太少时的修正」都用这一份，避免两处定义漂移。
     pub fn default_multi() -> Vec<Channel> {
         Self::engines().into_iter().filter(|&c| c != Self::WetypeOffline).collect()
     }
@@ -60,8 +62,20 @@ impl Channel {
     }
 }
 
+/// 触摸板速度的取值范围：倍率乘在手机端算好的位移上
+pub const POINTER_SPEED: (f32, f32) = (0.4, 2.5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    System,
+    Light,
+    Dark,
+}
+
+/// 配置文件与 1.0.0 的结构一一对应：缺字段、多字段都按损坏处理，整份回到默认
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Settings {
     pub channel: Channel,
     /// 边说边把字打进当前输入框
@@ -75,7 +89,36 @@ pub struct Settings {
     /// 各渠道上屏次数，次数多的排前
     pub pick_counts: HashMap<Channel, u32>,
     pub autostart: bool,
-    pub theme: String,
+    pub theme: Theme,
+    /// 触摸板速度倍率
+    pub pointer_speed: f32,
+}
+
+/// 界面能改的那几项，只带改了的字段。
+/// 上屏历史（`last_pick`、`pick_counts`）由会话自己记，界面拿着旧快照整份写回会把它冲掉
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Patch {
+    channel: Option<Channel>,
+    streaming: Option<bool>,
+    live_text: Option<bool>,
+    multi: Option<Vec<Channel>>,
+    autostart: Option<bool>,
+    theme: Option<Theme>,
+    pointer_speed: Option<f32>,
+}
+
+impl Patch {
+    pub fn apply(self, s: &mut Settings) {
+        let Patch { channel, streaming, live_text, multi, autostart, theme, pointer_speed } = self;
+        s.channel = channel.unwrap_or(s.channel);
+        s.streaming = streaming.unwrap_or(s.streaming);
+        s.live_text = live_text.unwrap_or(s.live_text);
+        s.multi = multi.unwrap_or_else(|| std::mem::take(&mut s.multi));
+        s.autostart = autostart.unwrap_or(s.autostart);
+        s.theme = theme.unwrap_or(s.theme);
+        s.pointer_speed = pointer_speed.unwrap_or(s.pointer_speed);
+    }
 }
 
 impl Default for Settings {
@@ -88,32 +131,43 @@ impl Default for Settings {
             last_pick: None,
             pick_counts: HashMap::new(),
             autostart: false,
-            theme: "system".into(),
+            theme: Theme::System,
+            pointer_speed: 1.0,
         }
     }
 }
 
+const FILE: &str = "settings.json";
+
 impl Settings {
+    /// 没有配置文件是首次启动，静默用默认；有但读不懂就记下原因再用默认
     pub fn load() -> Self {
-        let mut s: Settings = std::fs::read(data_file("settings.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let path = data_file(FILE);
+        let mut s = match std::fs::read(&path) {
+            Ok(b) => serde_json::from_slice(&b).unwrap_or_else(|e| {
+                crate::log_warn!("设置文件无法解析，已恢复默认：{e}");
+                Self::default()
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => {
+                crate::log_warn!("设置文件读取失败，已恢复默认：{e}");
+                Self::default()
+            }
+        };
         s.sanitize();
         s
     }
 
-    pub fn save(&self) {
-        if let Ok(b) = serde_json::to_vec_pretty(self) {
-            let _ = std::fs::write(data_file("settings.json"), b);
-        }
+    pub fn save(&self) -> Result<(), String> {
+        let b = serde_json::to_vec_pretty(self).expect("Settings 总能序列化");
+        std::fs::write(data_file(FILE), b).map_err(|e| format!("设置保存失败：{e}"))
     }
 
-    /// 不可用的渠道回落默认，勾选不足两个按全部渠道算
+    /// 界面或手改配置给出的越界值收回到合法范围。勾选不足两个按默认勾选算。
+    /// JSON 表达不了 NaN 和无穷，速度只需要夹到范围内
     pub fn sanitize(&mut self) {
-        if !Channel::available().contains(&self.channel) {
-            self.channel = Channel::Doubao;
-        }
+        let (lo, hi) = POINTER_SPEED;
+        self.pointer_speed = self.pointer_speed.clamp(lo, hi);
         let engines = Channel::engines();
         let mut multi: Vec<Channel> = engines.iter().copied().filter(|c| self.multi.contains(c)).collect();
         if multi.len() < 2 {
@@ -126,27 +180,41 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
 
-    /// 旧版本的配置文件缺新字段时，必须还能读出来。`serde(default)` +
-    /// `sanitize()` 是这条兼容性的全部实现，所以要有测试钉住。
-    #[test]
-    fn legacy_config_missing_fields_still_loads() {
-        let mut s: Settings = serde_json::from_str(r#"{"channel":"qwen","theme":"dark"}"#).unwrap();
+    /// 以默认值为底，改几个字段再解析
+    fn with(patch: Value) -> Settings {
+        let mut v = serde_json::to_value(Settings::default()).unwrap();
+        for (k, x) in patch.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        let mut s: Settings = serde_json::from_value(v).unwrap();
         s.sanitize();
-        assert_eq!(s.channel, Channel::Qwen);
-        assert_eq!(s.theme, "dark");
-        // 没写的字段取默认：流式与实时文字都开
-        assert!(s.streaming);
-        assert!(s.live_text);
-        // 多渠道没配过时取默认勾选（不含要下载模型的微信离线）
-        assert_eq!(s.multi, Channel::default_multi());
+        s
+    }
+
+    /// 不认旧格式：缺字段或带着不认识的字段都解析失败，load 会整份回到默认
+    #[test]
+    fn rejects_incomplete_or_foreign_config() {
+        assert!(serde_json::from_str::<Settings>(r#"{"channel":"qwen","theme":"dark"}"#).is_err());
+        let mut v = serde_json::to_value(Settings::default()).unwrap();
+        v["hotkey"] = json!("F8");
+        assert!(serde_json::from_value::<Settings>(v).is_err());
+    }
+
+    #[test]
+    fn roundtrips_default() {
+        let s = Settings::default();
+        let back: Settings = serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+        assert_eq!(back.channel, s.channel);
+        assert_eq!(back.multi, s.multi);
+        assert_eq!(back.pointer_speed, 1.0);
     }
 
     /// 多渠道至少要两家，否则那个模式没有意义
     #[test]
     fn multi_with_one_channel_is_expanded() {
-        let mut s: Settings = serde_json::from_str(r#"{"multi":["doubao"]}"#).unwrap();
-        s.sanitize();
+        let s = with(json!({ "multi": ["doubao"] }));
         assert_eq!(s.multi, Channel::default_multi());
         assert!(!s.multi.contains(&Channel::WetypeOffline), "不该顺手把要下载模型的渠道勾上");
     }
@@ -154,14 +222,42 @@ mod tests {
     /// 手改过的 multi 可能重复、乱序，甚至含「全部」这种不该出现在列表里的值
     #[test]
     fn multi_is_deduped_and_ordered() {
-        let mut s: Settings =
-            serde_json::from_str(r#"{"multi":["sogou","doubao","sogou","all","baidu"]}"#).unwrap();
-        s.sanitize();
+        let s = with(json!({ "multi": ["sogou", "doubao", "sogou", "all", "baidu"] }));
         assert_eq!(s.multi, vec![Channel::Doubao, Channel::Baidu, Channel::Sogou]);
     }
 
-    /// sanitize 必须幂等：设置会在每次启动和每次改动后跑一遍，
-    /// 非幂等会让「读出来—存回去」的循环里值越滚越偏。
+    #[test]
+    fn pointer_speed_is_clamped() {
+        assert_eq!(with(json!({ "pointerSpeed": 9.0 })).pointer_speed, POINTER_SPEED.1);
+        assert_eq!(with(json!({ "pointerSpeed": 0.0 })).pointer_speed, POINTER_SPEED.0);
+    }
+
+    #[test]
+    fn unknown_theme_is_rejected() {
+        let mut v = serde_json::to_value(Settings::default()).unwrap();
+        v["theme"] = json!("neon");
+        assert!(serde_json::from_value::<Settings>(v).is_err());
+    }
+
+    /// 补丁只动它带着的字段，上屏历史原样保留；界面不能借补丁改历史
+    #[test]
+    fn patch_touches_only_given_fields() {
+        let mut s = Settings {
+            last_pick: Some(Channel::Qwen),
+            pick_counts: [(Channel::Qwen, 3)].into(),
+            ..Default::default()
+        };
+        let p: Patch = serde_json::from_value(json!({ "streaming": false, "theme": "dark" })).unwrap();
+        p.apply(&mut s);
+        assert!(!s.streaming);
+        assert_eq!(s.theme, Theme::Dark);
+        assert_eq!(s.channel, Channel::Doubao);
+        assert_eq!(s.last_pick, Some(Channel::Qwen));
+        assert_eq!(s.pick_counts[&Channel::Qwen], 3);
+        assert!(serde_json::from_value::<Patch>(json!({ "pickCounts": {} })).is_err());
+    }
+
+    /// sanitize 必须幂等：设置会在每次启动和每次改动后跑一遍
     #[test]
     fn sanitize_is_idempotent() {
         let mut s = Settings::default();
@@ -170,13 +266,12 @@ mod tests {
         s.sanitize();
         assert_eq!(s.channel, once.channel);
         assert_eq!(s.multi, once.multi);
+        assert_eq!(s.pointer_speed, once.pointer_speed);
     }
 
-    /// 「全部」是合法的当前渠道（多渠道模式的入口），不该被当成非法值回落
+    /// 「全部」是合法的当前渠道（多渠道模式的入口）
     #[test]
     fn all_is_a_valid_current_channel() {
-        let mut s: Settings = serde_json::from_str(r#"{"channel":"all"}"#).unwrap();
-        s.sanitize();
-        assert_eq!(s.channel, Channel::All);
+        assert_eq!(with(json!({ "channel": "all" })).channel, Channel::All);
     }
 }

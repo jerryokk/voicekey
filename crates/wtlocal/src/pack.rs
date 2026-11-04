@@ -11,11 +11,23 @@ pub const SIZE: u64 = 102_920_639;
 pub const MD5: &str = "28386481eb94ff73b28ee3949c0cf690";
 const FILES: [&str; 1] = ["dict.decoder.utf8.txt"];
 
-/// 解出模型、词表到 dir：先写同级临时目录并试加载，成功后整体改名
+/// 解出模型、词表到 dir：先写同级临时目录并试加载，成功后整体改名；失败时删掉临时目录
 pub fn unpack(pack: &Path, dir: &Path) -> Result<()> {
     let tmp = dir.with_extension("tmp");
     let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir_all(&tmp)?;
+    let r = extract(pack, &tmp).and_then(|()| {
+        let _ = fs::remove_dir_all(dir);
+        Ok(fs::rename(&tmp, dir)?)
+    });
+    if r.is_err() {
+        let _ = fs::remove_dir_all(&tmp);
+    }
+    r
+}
+
+/// 解到 tmp 并试加载
+fn extract(pack: &Path, tmp: &Path) -> Result<()> {
+    fs::create_dir_all(tmp)?;
     let inner = tmp.join("inner.zip");
     io::copy(&mut ZipArchive::new(File::open(pack)?)?.by_name("ime_asr_decoder_model.zip")?, &mut File::create(&inner)?)?;
     let mut z = ZipArchive::new(File::open(&inner)?)?;
@@ -31,8 +43,6 @@ pub fn unpack(pack: &Path, dir: &Path) -> Result<()> {
     if !FILES.iter().all(|f| tmp.join(f).is_file()) {
         bail!("语音包内容不完整");
     }
-    drop(Model::load(&tmp)?);
-    let _ = fs::remove_dir_all(dir);
-    fs::rename(&tmp, dir)?;
+    drop(Model::load(tmp)?);
     Ok(())
 }

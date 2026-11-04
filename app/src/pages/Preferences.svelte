@@ -4,12 +4,13 @@
   import Row from "../lib/ui/Row.svelte";
   import Switch from "../lib/ui/Switch.svelte";
   import Segmented from "../lib/ui/Segmented.svelte";
+  import type { Theme } from "../lib/api";
 
   const s = $derived(app.s!);
   const info = $derived(app.info!);
   const all = $derived(s.channel === "all");
 
-  const THEMES = [
+  const THEMES: { v: Theme; label: string }[] = [
     { v: "system", label: "跟随系统" },
     { v: "light", label: "浅色" },
     { v: "dark", label: "深色" },
@@ -31,12 +32,22 @@
   </Row>
 </Card>
 
+<Card title="触摸板">
+  <Row label="光标速度" desc="1.0× 时慢慢划过整个触摸板，光标移动约半个屏幕；划得越快走得越远">
+    <div class="speed">
+      <input type="range" min={info.pointerSpeed[0]} max={info.pointerSpeed[1]} step="0.1" value={s.pointerSpeed} aria-label="光标速度"
+        onchange={(e) => save({ pointerSpeed: Number(e.currentTarget.value) })} />
+      <span>{s.pointerSpeed.toFixed(1)}×</span>
+    </div>
+  </Row>
+</Card>
+
 <Card title="通用">
   <Row label="开机自动启动" desc="登录后静默驻留托盘，不弹窗口">
     <Switch checked={s.autostart} label="开机自动启动" onchange={(v) => save({ autostart: v })} />
   </Row>
   <Row label="外观">
-    <Segmented value={s.theme} options={THEMES} onchange={(v) => save({ theme: v })} />
+    <Segmented value={s.theme} options={THEMES} label="外观" onchange={(v) => save({ theme: v })} />
   </Row>
 </Card>
 
@@ -45,6 +56,7 @@
 </Card>
 
 <style>
-  .sub { margin: 4px 0 16px; color: var(--fg-2); }
-  :global(.card) { margin-bottom: 12px; }
+  .speed { display: flex; align-items: center; gap: 10px; }
+  .speed input { width: 150px; accent-color: var(--accent); }
+  .speed span { width: 34px; text-align: right; font-size: var(--fs-sub); color: var(--fg-2); font-variant-numeric: tabular-nums; }
 </style>

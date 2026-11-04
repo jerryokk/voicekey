@@ -87,8 +87,6 @@ def render(size, glyph_only=False, tint=None, stroke=1.0):
 
 
 def main():
-    ICONS.mkdir(parents=True, exist_ok=True)
-
     # 应用图标（带徽章背景）
     render(32).save(ICONS / "32x32.png")
     render(128).save(ICONS / "128x128.png")

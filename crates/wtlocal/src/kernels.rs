@@ -1,4 +1,4 @@
-//! 数值内核：int8 动态量化矩阵乘（aarch64 sdot / x86_64 AVX2 / 标量兜底）与 f32 点积
+//! 数值内核：int8 动态量化矩阵乘（AVX2，CPU 不支持时走标量）与 f32 点积
 use rayon::prelude::*;
 
 /// 按行动态量化到 int8（对称，每行一个 scale）
@@ -70,11 +70,6 @@ pub fn qgemm(x: &QAct, w: &[i8], n: usize, ws: f32, bias: Option<&[f32]>) -> Vec
 fn dot(x: &[i8], xr: usize, w: &[i8], wr: usize, k: usize) -> [[i32; 4]; 2] {
     let xp = [x.as_ptr(), x[(xr - 1) * k..].as_ptr()];
     let wp: [*const i8; 4] = std::array::from_fn(|b| w[b.min(wr - 1) * k..].as_ptr());
-    #[cfg(target_arch = "aarch64")]
-    if k.is_multiple_of(16) {
-        return unsafe { neon::dot2x4(xp, wp, k) };
-    }
-    #[cfg(target_arch = "x86_64")]
     if k.is_multiple_of(32) && avx2() {
         return unsafe { avx::dot2x4(xp, wp, k) };
     }
@@ -100,39 +95,11 @@ fn dot1(a: &[i8], b: &[i8]) -> i32 {
     acc.iter().sum::<i32>() + ra.iter().zip(rb).map(|(&x, &y)| x as i32 * y as i32).sum::<i32>()
 }
 
-#[cfg(target_arch = "x86_64")]
 fn avx2() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| std::is_x86_feature_detected!("avx2"))
 }
 
-#[cfg(target_arch = "aarch64")]
-mod neon {
-    use std::arch::aarch64::*;
-
-    pub unsafe fn dot2x4(x: [*const i8; 2], w: [*const i8; 4], k: usize) -> [[i32; 4]; 2] {
-        let mut a = [vdupq_n_s32(0); 8];
-        let mut i = 0;
-        while i < k {
-            let x0 = vld1q_s8(x[0].add(i));
-            let x1 = vld1q_s8(x[1].add(i));
-            for b in 0..4 {
-                let wv = vld1q_s8(w[b].add(i));
-                a[b] = vdotq_s32(a[b], x0, wv);
-                a[4 + b] = vdotq_s32(a[4 + b], x1, wv);
-            }
-            i += 16;
-        }
-        let mut r = [[0; 4]; 2];
-        for b in 0..4 {
-            r[0][b] = vaddvq_s32(a[b]);
-            r[1][b] = vaddvq_s32(a[4 + b]);
-        }
-        r
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
 mod avx {
     use std::arch::x86_64::*;
 
@@ -144,7 +111,9 @@ mod avx {
         _mm_cvtsi128_si32(s)
     }
 
-    /// |x| (u8) × sign(w, x) (i8) 经 maddubs 成对累加到 i16（|x|≤127 不溢出），再 madd 到 i32
+    /// maddubs 只吃 u8 × i8：取 |w|（-128 的绝对值按 u8 读正好是 128）乘 sign(x, w)。
+    /// 不能反过来取 |x|·sign(w, x)：模型权重可能是 -128，取负溢出。x 由 quant 限在 ±127，取负安全；
+    /// 成对和最大 128×127×2 = 32512，i16 不饱和，再 madd 到 i32
     #[target_feature(enable = "avx2")]
     pub unsafe fn dot2x4(x: [*const i8; 2], w: [*const i8; 4], k: usize) -> [[i32; 4]; 2] {
         let ones = _mm256_set1_epi16(1);
@@ -153,11 +122,11 @@ mod avx {
         while i < k {
             let x0 = _mm256_loadu_si256(x[0].add(i) as *const __m256i);
             let x1 = _mm256_loadu_si256(x[1].add(i) as *const __m256i);
-            let (u0, u1) = (_mm256_sign_epi8(x0, x0), _mm256_sign_epi8(x1, x1));
             for b in 0..4 {
                 let wv = _mm256_loadu_si256(w[b].add(i) as *const __m256i);
-                let p0 = _mm256_madd_epi16(_mm256_maddubs_epi16(u0, _mm256_sign_epi8(wv, x0)), ones);
-                let p1 = _mm256_madd_epi16(_mm256_maddubs_epi16(u1, _mm256_sign_epi8(wv, x1)), ones);
+                let uw = _mm256_sign_epi8(wv, wv);
+                let p0 = _mm256_madd_epi16(_mm256_maddubs_epi16(uw, _mm256_sign_epi8(x0, wv)), ones);
+                let p1 = _mm256_madd_epi16(_mm256_maddubs_epi16(uw, _mm256_sign_epi8(x1, wv)), ones);
                 a[b] = _mm256_add_epi32(a[b], p0);
                 a[4 + b] = _mm256_add_epi32(a[4 + b], p1);
             }
@@ -207,6 +176,20 @@ mod tests {
             for j in 0..n {
                 let e = dot1(&q.q[i * k..(i + 1) * k], &w[j * k..(j + 1) * k]) as f32 * q.s[i] * 0.5 + b[j];
                 assert!((out[i * n + j] - e).abs() <= 1e-3 * e.abs().max(1.0), "{i},{j}");
+            }
+        }
+    }
+
+    #[test]
+    fn dot_handles_weight_min() {
+        // 权重取满 -128、激活取满 ±127：SIMD 路径必须与标量逐位一致
+        let k = 64;
+        let x: Vec<i8> = (0..2 * k).map(|i| if i % 3 == 0 { -127 } else { 127 - (i % 7) as i8 }).collect();
+        let w: Vec<i8> = (0..4 * k).map(|i| if i % 2 == 0 { -128 } else { (i % 5) as i8 - 2 }).collect();
+        let r = dot(&x, 2, &w, 4, k);
+        for a in 0..2 {
+            for b in 0..4 {
+                assert_eq!(r[a][b], dot1(&x[a * k..(a + 1) * k], &w[b * k..(b + 1) * k]), "{a},{b}");
             }
         }
     }

@@ -1,89 +1,121 @@
 //! 手机接入：拉起本地服务与隧道，把设备事件转成会话消息。
 //!
-//! 服务的生命周期等于应用的生命周期：随启动拉起，随退出消失。临时隧道地址每次启动
-//! 都会变，所以拿到地址后要立刻告诉前端刷新二维码。
+//! 服务随应用启动拉起。隧道起不来或中途退出都是失败：界面显示原因并提供重试，
+//! 重试会关掉旧服务、整套重新拉起（临时域名也会换一个）。
+//! 整个生命周期跑在一个任务里，启动、重试、关闭天然串行，不会两份服务抢端口。
 
 use crate::session::types::Msg;
-use crate::{AppState, RemoteStatus};
-use std::path::PathBuf;
+use crate::state::{AppState, Phase, RemoteStatus};
+use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter, Manager};
-use voicekey_remote::{Config, Event, Service};
+use tokio::sync::mpsc;
+use voicekey_remote::{Config, Service};
 
 /// 固定端口：二维码里带的就是它，改了这个值等于换了接入点
-pub const PORT: u16 = 47800;
+const PORT: u16 = 47800;
 
-/// 更新状态并通知前端刷新。event 数据只带状态本身，详情让前端拉 get_state
-fn set_status(app: &AppHandle, status: RemoteStatus) {
-    let payload = serde_json::json!({
-        "state": status.state,
-        "error": status.error,
-        "lanOnly": status.lan_only,
+static RESTART: OnceLock<mpsc::UnboundedSender<()>> = OnceLock::new();
+
+/// 更新状态并通知前端刷新。事件不带数据：二维码要按当前 token 现画，统一让前端拉 get_state
+fn set_status(app: &AppHandle, f: impl FnOnce(&mut RemoteStatus)) {
+    f(&mut app.state::<AppState>().remote_status.write().unwrap());
+    let _ = app.emit("remote", ());
+}
+
+/// cloudflared 只有一个位置：exe 旁边的 runtime/tunnel。
+/// 安装版、免安装版、`cargo build` 产物都是这个结构（tauri-build 会把资源拷到 target/<profile>）
+fn cloudflared() -> Result<std::path::PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("找不到程序路径：{e}"))?;
+    let dir = exe.parent().ok_or("程序路径没有上级目录")?;
+    Ok(dir.join("runtime").join("tunnel").join("cloudflared.exe"))
+}
+
+async fn start() -> Result<Service, String> {
+    Service::start(Config { port: PORT, cloudflared: cloudflared()? }).await
+}
+
+/// 重新拉起服务（界面上的「重试」）
+pub fn restart() {
+    if let Some(tx) = RESTART.get() {
+        let _ = tx.send(());
+    }
+}
+
+/// 等界面上的「重试」。启动期间攒下的重复点击一并消化；false 表示应用在退出
+async fn wait_retry(again: &mut mpsc::UnboundedReceiver<()>) -> bool {
+    let alive = again.recv().await.is_some();
+    while again.try_recv().is_ok() {}
+    alive
+}
+
+fn fail(app: &AppHandle, what: &str, e: String) {
+    crate::log_error!("{what}：{e}");
+    set_status(app, |s| {
+        s.phase = Phase::Failed;
+        s.error = Some(e);
+        s.devices = 0;
     });
-    app.state::<AppState>().remote_status.write().unwrap().clone_from(&status);
-    let _ = app.emit("remote", payload);
 }
 
 pub fn spawn(app: AppHandle) {
+    let (tx, mut again) = mpsc::unbounded_channel();
+    if RESTART.set(tx).is_err() {
+        return;
+    }
     tauri::async_runtime::spawn(async move {
-        let config = Config { port: PORT, cloudflared: cloudflared(&app), tunnel: true };
-        let mut service = match Service::start(config).await {
-            Ok(s) => s,
-            Err(e) => {
-                crate::log_error!("手机接入启动失败：{e}");
-                set_status(&app, RemoteStatus { state: "failed", error: Some(e), lan_only: false });
-                return;
+        loop {
+            set_status(&app, |s| *s = RemoteStatus::STARTING);
+            let mut service = match start().await {
+                Ok(s) => s,
+                Err(e) => {
+                    fail(&app, "手机接入启动失败", e);
+                    if !wait_retry(&mut again).await {
+                        return;
+                    }
+                    continue;
+                }
+            };
+
+            // 只打域名，不打带 token 的完整地址：日志会被截图、被上报
+            crate::log_info!("手机接入已就绪：{}", service.origin());
+            *app.state::<AppState>().remote.write().unwrap() = Some(service.handle());
+            set_status(&app, |s| s.phase = Phase::Ready);
+
+            let mut devices = service.devices();
+            let mut logs = service.logs();
+            let broken = loop {
+                tokio::select! {
+                    // 发送端在服务里，服务活着就不会 Closed；Lagged 只是漏记了几条
+                    Ok(line) = logs.recv() => crate::log_error!("手机接入：{line}"),
+                    event = service.next_event() => match event {
+                        Ok(event) => {
+                            let _ = app.state::<AppState>().tx.send(Msg::Remote(event));
+                        }
+                        Err(reason) => break Some(reason),
+                    },
+                    Ok(()) = devices.changed() => {
+                        let n = *devices.borrow_and_update();
+                        crate::ui::tray_devices(&app, n);
+                        set_status(&app, |s| s.devices = n);
+                    }
+                    _ = again.recv() => break None,
+                }
+            };
+            while again.try_recv().is_ok() {}
+
+            *app.state::<AppState>().remote.write().unwrap() = None;
+            crate::ui::tray_devices(&app, 0);
+            service.close().await;
+            // 旧服务的连接已全部断开：说到一半的那句按断线处理，没松开的鼠标键全部放开
+            let reason = broken.clone().unwrap_or_else(|| "手机接入已重启".into());
+            let _ = app.state::<AppState>().tx.send(Msg::Reset(reason));
+
+            if let Some(e) = broken {
+                fail(&app, "手机接入中断", e);
+                if !wait_retry(&mut again).await {
+                    return;
+                }
             }
-        };
-
-        // 只打域名，不打带 token 的完整地址：控制台截图、日志上报都会把它带出去
-        crate::log_info!("手机接入已就绪：{}", service.origin());
-        let lan_only = service.origin().starts_with("http://127.0.0.1");
-        if lan_only {
-            crate::log_warn!("隧道不可用，仅本机地址");
-        }
-        {
-            let st = app.state::<AppState>();
-            *st.remote.write().unwrap() = Some(service.handle());
-            *st.remote_url.write().unwrap() = Some(service.url());
-            *st.remote_origin.write().unwrap() = Some(service.origin().to_string());
-        }
-        let error = service.tunnel_error().map(|e| e.to_string());
-        set_status(&app, RemoteStatus { state: "ready", error, lan_only });
-
-        while let Some(event) = service.next_event().await {
-            // 音频只在按下这一刻取：取早了是上一句的，取晚了会被下一句覆盖
-            let audio = if matches!(event, Event::Press) { service.take_audio().await } else { None };
-            let _ = app.state::<AppState>().tx.send(Msg::Remote(event, audio));
         }
     });
-}
-
-/// 找 cloudflared，四处依次尝试，都找不到才放弃：
-///
-/// 1. 资源目录——打包安装后的位置（`bundle.resources` 把 binaries/ 映射到根部）
-/// 2. 程序目录下的 runtime/tunnel——把 exe 单独拷出来用的场景
-/// 3. 源码树里的 app/src-tauri/binaries——`cargo run` / `tauri dev` 时用，
-///    编译期就把路径烧进二进制，所以直接跑 target/debug 里的 exe 也不用先拷文件
-/// 4. PATH——自己装了 cloudflared 的用户
-fn cloudflared(app: &AppHandle) -> Option<PathBuf> {
-    let name = if cfg!(windows) { "cloudflared.exe" } else { "cloudflared" };
-    let mut candidates: Vec<PathBuf> = Vec::new();
-
-    if let Ok(dir) = app.path().resource_dir() {
-        candidates.push(dir.join(name));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("runtime").join("tunnel").join(name));
-            candidates.push(dir.join(name));
-        }
-    }
-    // 开发期：编译时记录下来的源码路径
-    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries").join(name));
-
-    if let Some(found) = candidates.into_iter().find(|p| p.is_file()) {
-        return Some(found);
-    }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(name)).find(|p| p.is_file())
 }

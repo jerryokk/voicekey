@@ -1,15 +1,15 @@
 pub mod audio;
-pub mod baidu;
-pub mod chatterfly;
-pub mod doubao;
-pub mod opus;
-pub mod pb;
-pub mod qwen;
+mod baidu;
+mod chatterfly;
+mod doubao;
+mod ifly;
+mod opus;
+mod pb;
+mod qwen;
+mod sogou;
 pub mod util;
-pub mod sogou;
-pub mod wetype;
-pub mod ifly;
-pub mod ws;
+mod wetype;
+mod ws;
 
 use anyhow::Result;
 use std::time::Instant;
@@ -30,26 +30,18 @@ const PROBE_WAV: &[u8] = include_bytes!("../assets/probe.wav");
 
 #[async_trait::async_trait]
 pub trait Engine: Send + Sync {
-    /// 消费音频帧，中间结果经 partial 回调，返回最终文本
+    /// 消费音频帧，中间结果经 partial 回调。
+    /// 正常结束返回定稿（没识别到内容为空串）；任何失败都返回 Err，不拿中间结果充当定稿
     async fn run(&self, audio: Audio, partial: Partial) -> Result<String>;
     /// 预先建连，缩短首包延迟
     async fn prewarm(&self) {}
 
     /// 端到端自检：把内置测试语音按实时节奏喂一遍，返回识别结果与耗时。
-    /// 七个渠道共用这一份实现——渠道是否可用，只有真跑一次才知道。
+    /// 所有渠道共用这一份实现——渠道是否可用，只有真跑一次才知道。
     async fn probe(&self) -> Result<Probe> {
-        let frames = audio::frames_from_bytes(PROBE_WAV)?;
-        let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            for f in frames {
-                if tx.send(f).is_err() {
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        });
+        let audio = audio::realtime(audio::wav_frames(PROBE_WAV)?);
         let t0 = Instant::now();
-        let text = self.run(rx, Box::new(|_| {})).await?;
+        let text = self.run(audio, Box::new(|_| {})).await?;
         Ok(Probe { ms: t0.elapsed().as_millis() as u64, text })
     }
 }
@@ -57,7 +49,7 @@ pub trait Engine: Send + Sync {
 pub use baidu::BaiduEngine;
 pub use chatterfly::ChatterflyEngine;
 pub use doubao::DoubaoEngine;
+pub use ifly::IflyEngine;
 pub use qwen::QwenEngine;
 pub use sogou::SogouEngine;
 pub use wetype::WeTypeEngine;
-pub use ifly::IflyEngine;

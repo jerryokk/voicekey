@@ -1,7 +1,8 @@
-//! Windows 上屏：剪贴板 + Ctrl+V，随后恢复原剪贴板。
+//! Windows 键盘注入：一次性上屏走剪贴板 + Ctrl+V，边说边上屏走逐字 Unicode 键入。
 //!
-//! 不走逐字模拟，是因为中文长句用 SendInput 打太慢；剪贴板一条 Ctrl+V 就完事，
+//! 定稿整句走剪贴板：一条 Ctrl+V 就完事，不受长句和输入法状态影响，
 //! 代价是要在 500ms 后把用户原来的剪贴板还回去，且只在用户没改动过时才还。
+//! 流式上屏每次只补打几个字，用 [`type_chars`] 直接发 Unicode 键，不碰剪贴板。
 //!
 //! 还有一件事必须处理：Windows 的 UIPI 会**静默丢弃**低权限进程发往高权限窗口
 //! （以管理员身份运行的窗口）的键鼠输入。表现是「识别成功、字一个也没进去」，
@@ -15,7 +16,7 @@ use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
 use windows::Win32::System::Threading::{OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-    VIRTUAL_KEY,
+    VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_V,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
@@ -26,38 +27,69 @@ pub enum Pasted {
     Sent,
     /// 前台窗口权限更高，输入会被系统丢弃：正文留在剪贴板里，等用户手动粘贴
     Blocked,
-    /// 剪贴板不可用，退化成逐字输入
-    Typed,
 }
 
-fn key_input(vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+const PRESS: KEYBD_EVENT_FLAGS = KEYBD_EVENT_FLAGS(0);
+
+fn key_input(vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: 0 },
-        },
+        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
     }
 }
 
-fn send(inputs: &[INPUT]) {
-    if !inputs.is_empty() {
-        unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+/// 注入一串输入，返回系统实际收下的条数。少于请求数说明被系统挡下了（UIPI、安全桌面），
+/// 此时错误原因在线程错误码里，必须紧接着取
+fn inject(inputs: &[INPUT]) -> Result<(), (usize, String)> {
+    if inputs.is_empty() {
+        return Ok(());
+    }
+    let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) } as usize;
+    if sent == inputs.len() {
+        Ok(())
+    } else {
+        Err((sent, format!("系统拦下了模拟输入（{sent}/{}）：{}", inputs.len(), windows::core::Error::from_thread())))
     }
 }
 
-pub fn backspace(n: usize) {
-    let inputs: Vec<INPUT> = (0..n)
-        .flat_map(|_| [key_input(0x08, 0, KEYBD_EVENT_FLAGS(0)), key_input(0x08, 0, KEYEVENTF_KEYUP)])
-        .collect();
-    send(&inputs);
+pub(crate) fn send(inputs: &[INPUT]) -> Result<(), String> {
+    inject(inputs).map_err(|(_, e)| e)
 }
 
-pub(crate) fn type_text(text: &str) {
-    let inputs: Vec<INPUT> = text
-        .encode_utf16()
-        .flat_map(|u| [key_input(0, u, KEYEVENTF_UNICODE), key_input(0, u, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)])
-        .collect();
-    send(&inputs);
+/// 注入若干按键，每组是一个字符的按下与松开。返回已落地的组数：
+/// 字符在它最后一个按下事件送达时落地，只差末尾的松开也算
+fn send_keys(keys: Vec<Vec<INPUT>>) -> (usize, Result<(), String>) {
+    let ends: Vec<usize> = keys.iter().scan(0, |end, k| Some(*end + k.len())).collect();
+    let inputs: Vec<INPUT> = keys.into_iter().flatten().collect();
+    match inject(&inputs) {
+        Ok(()) => (ends.len(), Ok(())),
+        Err((sent, e)) => (ends.iter().take_while(|&&end| end - 1 <= sent).count(), Err(e)),
+    }
+}
+
+/// 退格 n 次，返回实际删掉的字数
+pub(crate) fn erase(n: usize) -> (usize, Result<(), String>) {
+    send_keys((0..n).map(|_| vec![key_input(VK_BACK, 0, PRESS), key_input(VK_BACK, 0, KEYEVENTF_KEYUP)]).collect())
+}
+
+pub fn backspace(n: usize) -> Result<(), String> {
+    erase(n).1
+}
+
+/// 逐字发 Unicode 键，返回实际打出的字数
+pub(crate) fn type_chars(chars: &[char]) -> (usize, Result<(), String>) {
+    let none = VIRTUAL_KEY(0);
+    send_keys(
+        chars
+            .iter()
+            .map(|c| {
+                c.encode_utf16(&mut [0; 2])
+                    .iter()
+                    .flat_map(|&u| [key_input(none, u, KEYEVENTF_UNICODE), key_input(none, u, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)])
+                    .collect()
+            })
+            .collect(),
+    )
 }
 
 /// 前台窗口是否高到我们打不进去。流式上屏受同一条限制，所以进入会话前就该问一次。
@@ -76,8 +108,8 @@ pub fn input_blocked() -> bool {
     }
 }
 
-/// 某进程是否以管理员身份运行。查不到时按「不是」处理：
-/// 错判的代价只是多试一次粘贴，比误报「打不进去」要好。
+/// 某进程是否以管理员身份运行。查不到时按「不是」处理：拿不到令牌的多半是
+/// 系统保护进程（它们本来也不是输入目标），错判的代价只是多试一次粘贴。
 fn elevated(pid: u32) -> bool {
     unsafe {
         let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
@@ -105,31 +137,25 @@ fn elevated(pid: u32) -> bool {
 }
 
 /// 借剪贴板 + Ctrl+V 上屏，随后恢复原剪贴板（文本/图片）
-pub fn paste(text: &str) -> Pasted {
-    let Ok(mut cb) = arboard::Clipboard::new() else {
-        type_text(text);
-        return Pasted::Typed;
-    };
+pub fn paste(text: &str) -> Result<Pasted, String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板不可用：{e}"))?;
     let saved_text = cb.get_text().ok();
     let saved_image = if saved_text.is_none() { cb.get_image().ok() } else { None };
-    if cb.set_text(text).is_err() {
-        type_text(text);
-        return Pasted::Typed;
-    }
+    cb.set_text(text).map_err(|e| format!("写剪贴板失败：{e}"))?;
     // 高权限窗口：Ctrl+V 会被系统丢掉。这时剪贴板里必须留着正文，
     // 不能走「500ms 后恢复」，否则用户想手动粘贴时拿到的是旧内容。
     if input_blocked() {
-        return Pasted::Blocked;
+        return Ok(Pasted::Blocked);
     }
     let seq = unsafe { GetClipboardSequenceNumber() };
     send(&[
-        key_input(0x11, 0, KEYBD_EVENT_FLAGS(0)),
-        key_input(0x56, 0, KEYBD_EVENT_FLAGS(0)),
-        key_input(0x56, 0, KEYEVENTF_KEYUP),
-        key_input(0x11, 0, KEYEVENTF_KEYUP),
-    ]);
+        key_input(VK_CONTROL, 0, PRESS),
+        key_input(VK_V, 0, PRESS),
+        key_input(VK_V, 0, KEYEVENTF_KEYUP),
+        key_input(VK_CONTROL, 0, KEYEVENTF_KEYUP),
+    ])?;
     if saved_text.is_none() && saved_image.is_none() {
-        return Pasted::Sent;
+        return Ok(Pasted::Sent);
     }
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(500));
@@ -145,5 +171,5 @@ pub fn paste(text: &str) -> Pasted {
             }
         }
     });
-    Pasted::Sent
+    Ok(Pasted::Sent)
 }

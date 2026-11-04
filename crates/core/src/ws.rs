@@ -52,7 +52,7 @@ pub fn data<E: std::fmt::Display>(msg: Option<Result<Message, E>>) -> Result<Opt
     match msg {
         None => bail!("连接已断开"),
         Some(Err(e)) => bail!("连接异常：{e}"),
-        Some(Ok(Message::Binary(b))) => Ok(Some(b.to_vec())),
+        Some(Ok(Message::Binary(b))) => Ok(Some(b.into())),
         Some(Ok(Message::Text(t))) => Ok(Some(t.as_bytes().to_vec())),
         Some(Ok(Message::Close(_))) => bail!("服务器关闭了连接"),
         Some(Ok(_)) => Ok(None),

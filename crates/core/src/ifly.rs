@@ -1,8 +1,10 @@
+use crate::util::{civil_from_days, urlencode};
 use crate::ws;
 use crate::{Audio, Engine, Partial};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
+use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
@@ -19,39 +21,18 @@ const API_SECRET: &str = "sH8v2wSSxxHTy1UNfN6dFaSqVjlmR7BB";
 const CHUNK: usize = 1280;
 
 /// 讯飞输入法云端 ASR：IAT WebSocket + HMAC-SHA256
-#[derive(Default)]
 pub struct IflyEngine;
-
-fn enc(s: &str) -> String {
-    let mut o = String::with_capacity(s.len() + 8);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => o.push(b as char),
-            _ => o.push_str(&format!("%{b:02X}")),
-        }
-    }
-    o
-}
 
 fn http_gmt() -> String {
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-    let z = t.div_euclid(86400);
+    let days = t.div_euclid(86400);
     let tod = t.rem_euclid(86400);
     let h = tod / 3600;
     let m = (tod % 3600) / 60;
     let s = tod % 60;
-    let wday = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][z.rem_euclid(7) as usize];
-    let z = z + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mo = mp + if mp < 10 { 3 } else { -9 };
-    let y = y + i64::from(mo <= 2);
-    let mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][(mo - 1) as usize];
+    let wday = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][days.rem_euclid(7) as usize];
+    let (y, mo, d) = civil_from_days(days);
+    let mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][mo as usize - 1];
     format!("{wday}, {d:02} {mon} {y} {h:02}:{m:02}:{s:02} GMT")
 }
 
@@ -60,10 +41,10 @@ fn auth_url() -> Result<String> {
     let origin = format!("host: {HOST}\ndate: {date}\nGET {PATH} HTTP/1.1");
     let mut mac = Hmac::<Sha256>::new_from_slice(API_SECRET.as_bytes())?;
     mac.update(origin.as_bytes());
-    let sig = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+    let sig = B64.encode(mac.finalize().into_bytes());
     let auth_origin = format!(r#"api_key="{API_KEY}", algorithm="hmac-sha256", headers="host date request-line", signature="{sig}""#);
-    let auth = base64::engine::general_purpose::STANDARD.encode(auth_origin);
-    Ok(format!("wss://{HOST}{PATH}?authorization={}&date={}&host={HOST}", enc(&auth), enc(&date)))
+    let auth = B64.encode(auth_origin);
+    Ok(format!("wss://{HOST}{PATH}?authorization={}&date={}&host={HOST}", urlencode(&auth), urlencode(&date)))
 }
 
 fn pgs_text(segs: &mut BTreeMap<i64, String>, v: &Value) -> Option<String> {
@@ -77,49 +58,47 @@ fn pgs_text(segs: &mut BTreeMap<i64, String>, v: &Value) -> Option<String> {
             }
         }
     }
+    // rpl：本条替换 sn 在 rg=[a, b] 内的旧片段
     if r.get("pgs").and_then(Value::as_str) == Some("rpl") {
-        if let Some(rg) = r.get("rg").and_then(Value::as_array) {
-            if rg.len() == 2 {
-                let a = rg[0].as_i64().unwrap_or(0);
-                let b = rg[1].as_i64().unwrap_or(0);
-                segs.retain(|k, _| *k < a || *k > b);
-            }
+        if let Some([a, b]) = r.get("rg").and_then(Value::as_array).and_then(|rg| rg.iter().map(Value::as_i64).collect::<Option<Vec<_>>>()).as_deref() {
+            segs.retain(|k, _| k < a || k > b);
         }
     }
     segs.insert(sn, t);
     Some(segs.values().cloned().collect())
 }
 
-fn frame(status: i32, audio: &[u8], first: bool) -> String {
-    let audio = base64::engine::general_purpose::STANDARD.encode(audio);
-    if first {
+/// status：0 首帧（带 common/business）、1 中间帧、2 结束帧
+fn frame(status: i32, audio: &[u8]) -> Message {
+    let data = json!({"status": status, "format": "audio/L16;rate=16000", "encoding": "raw", "audio": B64.encode(audio)});
+    let v = if status == 0 {
         json!({
             "common": {"app_id": APPID},
             "business": {"language":"zh_cn","domain":"iat","accent":"mandarin","vad_eos":3000,"dwa":"wpgs","nunum":1,"ptt":1},
-            "data": {"status": status, "format":"audio/L16;rate=16000", "encoding":"raw", "audio": audio}
+            "data": data,
         })
-        .to_string()
     } else {
-        json!({"data": {"status": status, "format":"audio/L16;rate=16000", "encoding":"raw", "audio": audio}}).to_string()
-    }
+        json!({ "data": data })
+    };
+    Message::Text(v.to_string().into())
 }
 
 #[async_trait::async_trait]
 impl Engine for IflyEngine {
     async fn run(&self, audio: Audio, partial: Partial) -> Result<String> {
         let mut audio = crate::audio::lead(audio);
-        let mut ws = ws::connect(&auth_url()?, &[]).await?;
+        let ws = ws::connect(&auth_url()?, &[]).await?;
         let mut segs = BTreeMap::new();
         let mut text = String::new();
-        let mut first = true;
+        let mut status = 0;
         let mut buf = Vec::new();
-        let mut last = false;
 
+        // 返回是否为最后一条结果
         let mut apply = |raw: &[u8], text: &mut String| -> Result<bool> {
-            let v: Value = serde_json::from_slice(raw)?;
-            let code = v["code"].as_i64().unwrap_or(-1);
+            let v: Value = serde_json::from_slice(raw).context("讯飞响应解析失败")?;
+            let code = v["code"].as_i64().context("讯飞响应缺少 code")?;
             if code != 0 {
-                bail!("讯飞{}", v["message"].as_str().unwrap_or("识别失败"));
+                bail!("讯飞{}（{code}）", v["message"].as_str().unwrap_or("识别失败"));
             }
             if let Some(w) = pgs_text(&mut segs, &v) {
                 if w != *text {
@@ -130,31 +109,50 @@ impl Engine for IflyEngine {
             Ok(v["data"]["status"].as_i64() == Some(2))
         };
 
-        while let Some(frame_pcm) = audio.recv().await {
-            buf.extend(frame_pcm.iter().flat_map(|s| s.to_le_bytes()));
-            while buf.len() >= CHUNK {
-                let chunk: Vec<u8> = buf.drain(..CHUNK).collect();
-                ws.send(Message::Text(frame(if first { 0 } else { 1 }, &chunk, first))).await?;
-                first = false;
-            }
-            while let Ok(Some(d)) = ws::recv_opt(&mut ws, Duration::from_millis(1)).await {
-                last = apply(&d, &mut text)?;
+        // 服务端按 vad_eos 判定说完时会主动回 status=2 并关连接：收到即定稿，返回已识别的文字，不再发帧。
+        // 先收后发（biased），已到的 status=2 不会被下一次发送的失败盖掉
+        let (mut sink, mut stream) = ws.split();
+        loop {
+            tokio::select! {
+                biased;
+                msg = stream.next() => {
+                    if let Some(d) = ws::data(msg)? {
+                        if apply(&d, &mut text)? {
+                            return Ok(text);
+                        }
+                    }
+                }
+                pcm = audio.recv() => {
+                    let end = pcm.is_none();
+                    buf.extend(pcm.iter().flatten().flat_map(|s| s.to_le_bytes()));
+                    let sent: Result<()> = async {
+                        while buf.len() >= CHUNK {
+                            sink.send(frame(status, &buf[..CHUNK])).await?;
+                            buf.drain(..CHUNK);
+                            status = 1;
+                        }
+                        if end {
+                            if !buf.is_empty() {
+                                sink.send(frame(status, &buf)).await?;
+                            }
+                            sink.send(frame(2, &[])).await?;
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    // 发送失败多半是服务端定稿后关了连接：停发，去接收端取 status=2；真断了那边会报错
+                    if end || sent.is_err() {
+                        break;
+                    }
+                }
             }
         }
-        if !buf.is_empty() {
-            ws.send(Message::Text(frame(if first { 0 } else { 1 }, &buf, first))).await?;
-            first = false;
-        }
-        ws.send(Message::Text(frame(2, &[], first))).await?;
         let deadline = Instant::now() + Duration::from_millis(2500);
-        while !last && Instant::now() < deadline {
-            if let Some(d) = ws::recv_opt(&mut ws, deadline - Instant::now()).await? {
-                last = apply(&d, &mut text)?;
+        loop {
+            let d = ws::recv(&mut stream, deadline.saturating_duration_since(Instant::now())).await.context("讯飞定稿")?;
+            if apply(&d, &mut text)? {
+                return Ok(text);
             }
         }
-        if text.is_empty() {
-            bail!("讯飞没有识别文本");
-        }
-        Ok(text)
     }
 }

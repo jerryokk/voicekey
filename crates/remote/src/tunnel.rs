@@ -1,6 +1,6 @@
 //! Cloudflare Quick Tunnel：把本机服务映射成一个公网 https 域名。
 //!
-//! 隧道只承载 HTTP 与 WebSocket —— 页面的音频走 WebRTC 直连，不经过这里。
+//! 隧道只承载页面与 WebSocket 信令——音频和触摸板走 WebRTC 直连，不经过这里。
 //! 之所以还需要它，是因为浏览器只在安全上下文（https）里给麦克风权限，
 //! 局域网 http 拿不到麦克风，这个限制绕不过去。
 
@@ -8,8 +8,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
+use tokio::sync::mpsc;
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 /// Cloudflare 要给每个快速隧道分配边缘地址和域名，超过这个时间说明网络到不了
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -20,7 +28,7 @@ pub struct Tunnel {
     origin: String,
     /// Windows 作业对象：句柄在本进程里，本进程无论怎么退（正常退出、崩溃、被强杀），
     /// 内核关闭句柄时都会按 kill-on-close 连带结束 cloudflared。只包含我们自己启动的那个。
-    _job: Option<Job>,
+    _job: Job,
 }
 
 impl Tunnel {
@@ -28,96 +36,56 @@ impl Tunnel {
     pub fn origin(&self) -> &str {
         &self.origin
     }
-}
 
-impl Drop for Tunnel {
-    fn drop(&mut self) {
-        // 进程退出必须带走隧道，否则公网域名会指着一个已经不属于我们的端口。
-        // 常规路径 start_kill 就够；作业对象兜底的是「Drop 来不及跑」的强杀场景。
-        let _ = self.child.start_kill();
+    /// 等 cloudflared 退出，返回给用户看的原因。它一退，二维码上的地址就失效了
+    pub async fn exited(&mut self) -> String {
+        match self.child.wait().await {
+            Ok(status) => format!("隧道进程意外退出（{status}）"),
+            Err(e) => format!("隧道进程状态未知：{e}"),
+        }
     }
 }
 
-/// 把子进程绑进一个 kill-on-close 的作业对象。失败（嵌套作业受限、进程已退出）只意味着
-/// 退回「常规 Drop 兜底」，不值得报错。
-#[cfg(windows)]
-fn bind_to_job(child: &Child) -> Option<Job> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    };
-
+/// 把子进程绑进一个 kill-on-close 的作业对象
+fn bind_to_job(child: &Child) -> Result<Job, String> {
+    let fail = |e: windows::core::Error| format!("无法把 cloudflared 绑进作业对象：{e}");
+    let process = HANDLE(child.raw_handle().ok_or("cloudflared 已经退出")?);
     unsafe {
-        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-        if job == 0 {
-            return None;
-        }
-        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        let job = Job(CreateJobObjectW(None, PCWSTR::null()).map_err(fail)?);
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        let set = SetInformationJobObject(
-            job,
+        SetInformationJobObject(
+            job.0,
             JobObjectExtendedLimitInformation,
             &info as *const _ as *const _,
             std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-        );
-        let handle = child.raw_handle().map(|h| h as isize);
-        let assigned = set != 0
-            && handle.is_some_and(|h| AssignProcessToJobObject(job, h) != 0);
-        if assigned {
-            Some(Job { handle: job })
-        } else {
-            CloseHandle(job);
-            None
-        }
+        )
+        .map_err(fail)?;
+        AssignProcessToJobObject(job.0, process).map_err(fail)?;
+        Ok(job)
     }
 }
 
-#[cfg(windows)]
-struct Job {
-    handle: windows_sys::Win32::Foundation::HANDLE,
-}
+struct Job(HANDLE);
 
-#[cfg(windows)]
+// 作业对象句柄只在 Drop 时关闭一次，跨线程移动是安全的
+unsafe impl Send for Job {}
+unsafe impl Sync for Job {}
+
 impl Drop for Job {
     fn drop(&mut self) {
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
-    }
-}
-
-#[cfg(not(windows))]
-fn bind_to_job(_child: &Child) -> Option<Job> {
-    None
-}
-
-#[cfg(not(windows))]
-struct Job;
-
-/// 在几个常规位置找 cloudflared：显式指定 → 程序目录的 runtime/tunnel → PATH
-pub fn find(explicit: Option<PathBuf>) -> Option<PathBuf> {
-    if let Some(path) = explicit.filter(|p| p.is_file()) {
-        return Some(path);
-    }
-    let name = if cfg!(windows) { "cloudflared.exe" } else { "cloudflared" };
-    if let Ok(current) = std::env::current_exe() {
-        if let Some(dir) = current.parent() {
-            let candidate = dir.join("runtime").join("tunnel").join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
+        unsafe {
+            let _ = CloseHandle(self.0);
         }
     }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(name)).find(|p| p.is_file())
 }
 
 pub async fn start(exe: &Path, local_origin: &str) -> Result<Tunnel, String> {
-    let config = temp_config()?;
+    let config = Config::write()?;
     let mut cmd = Command::new(exe);
     cmd.arg("tunnel")
         .arg("--config")
-        .arg(&config)
+        .arg(&config.0)
         .arg("--no-autoupdate")
         .arg("--loglevel")
         .arg("info")
@@ -129,109 +97,98 @@ pub async fn start(exe: &Path, local_origin: &str) -> Result<Tunnel, String> {
         .arg("--max-edge-addr-retries")
         .arg("0")
         .arg("--url")
-        .arg(local_origin);
-    hide_window(&mut cmd);
+        .arg(local_origin)
+        // 隧道建到一半失败时 Tunnel 还不存在，靠它收掉子进程；之后 Tunnel 被丢弃时同样生效
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW.0);
 
     let mut child = cmd.spawn().map_err(|e| spawn_error(exe, e))?;
-    let job = bind_to_job(&child);
-    let found = wait_first(child.stdout.take(), child.stderr.take(), quick_origin).await;
-    let _ = std::fs::remove_file(&config);
-    finish(child, found, job, "cloudflared 在分配地址前退出了，请检查网络")
+    let job = bind_to_job(&child)?;
+    let mut lines = drain(child.stdout.take(), child.stderr.take());
+    match tokio::time::timeout(STARTUP_TIMEOUT, first_match(&mut lines)).await {
+        Ok(Ok(origin)) => Ok(Tunnel { child, origin, _job: job }),
+        Ok(Err(detail)) => Err(early_exit(detail)),
+        Err(_) => Err(format!("{} 秒内没连上 Cloudflare，请检查网络", STARTUP_TIMEOUT.as_secs())),
+    }
 }
 
-fn temp_config() -> Result<PathBuf, String> {
-    let config = std::env::temp_dir().join(format!("voicekey-cloudflared-{}.yml", std::process::id()));
-    std::fs::File::create(&config)
-        .and_then(|mut f| f.write_all(b"metrics: 127.0.0.1:0\n"))
-        .map_err(|e| format!("无法写隧道配置：{e}"))?;
-    Ok(config)
+/// 临时配置：只放 `metrics: 127.0.0.1:0`（默认端口会和机器上别的 cloudflared 抢）。
+/// 显式给 `--config` 还有一个作用：不读用户自己 `~/.cloudflared` 里的配置，
+/// 那里的命名隧道设置会让快速隧道起不来。cloudflared 启动时读一次，之后删掉即可
+struct Config(PathBuf);
+
+impl Config {
+    fn write() -> Result<Self, String> {
+        let path = std::env::temp_dir().join(format!("voicekey-cloudflared-{}.yml", std::process::id()));
+        std::fs::File::create(&path)
+            .and_then(|mut f| f.write_all(b"metrics: 127.0.0.1:0\n"))
+            .map_err(|e| format!("无法写隧道配置：{e}"))?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for Config {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 fn spawn_error(exe: &Path, e: std::io::Error) -> String {
-    if !exe.is_file() {
-        format!("隧道程序不存在：{}", exe.display())
-    } else {
+    if exe.is_file() {
         format!("cloudflared 启动失败：{e}")
+    } else {
+        format!("隧道程序不存在：{}", exe.display())
     }
 }
 
-fn hide_window(cmd: &mut Command) {
-    // kill_on_drop 是第一层兜底：哪怕 Tunnel 还没建成就放弃（比如隧道建到一半失败），
-    // Child 一被丢弃也会发终止信号
-    cmd.kill_on_drop(true);
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+fn early_exit(detail: Option<String>) -> String {
+    const EXITED: &str = "cloudflared 在分配地址前退出了，请检查网络";
+    match detail {
+        // 429 是最常见的一种：临时域名有配额，被限流时换个说法用户才知道该怎么办
+        Some(d) if d.contains("429") => "Cloudflare 临时域名限流（429），新建隧道太频繁，稍后再重试".into(),
+        Some(d) => format!("{EXITED}（{d}）"),
+        None => EXITED.into(),
     }
 }
 
-async fn wait_first<F>(
+/// 两个管道都要一直读到进程退出：cloudflared 会同时往 stdout 和 stderr 写，
+/// 哪个管道没人读，写满后就会把它卡死。拿到地址之后的日志直接丢弃
+fn drain(
     stdout: Option<tokio::process::ChildStdout>,
     stderr: Option<tokio::process::ChildStderr>,
-    match_line: F,
-) -> Result<(Option<String>, Option<String>), tokio::time::error::Elapsed>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    tokio::time::timeout(STARTUP_TIMEOUT, first_match(stdout, stderr, match_line)).await
-}
-
-fn finish(
-    mut child: Child,
-    found: Result<(Option<String>, Option<String>), tokio::time::error::Elapsed>,
-    job: Option<Job>,
-    early_exit: &str,
-) -> Result<Tunnel, String> {
-    match found {
-        Ok((Some(origin), _)) => Ok(Tunnel { child, origin, _job: job }),
-        Ok((None, detail)) => {
-            let _ = child.start_kill();
-            let reason = detail.unwrap_or_default();
-            // 429 是最常见的一种：临时域名有配额，被限流时换个说法用户才知道该怎么办
-            if reason.contains("429") {
-                return Err("Cloudflare 临时域名限流（429），新建隧道太频繁，稍后会自动恢复".into());
-            }
-            Err(if reason.is_empty() { early_exit.into() } else { format!("{early_exit}（{reason}）") })
-        }
-        Err(_) => {
-            let _ = child.start_kill();
-            Err(format!("{} 秒内没连上 Cloudflare，请检查网络", STARTUP_TIMEOUT.as_secs()))
+) -> mpsc::UnboundedReceiver<String> {
+    async fn pipe<R: AsyncRead + Unpin>(reader: R, tx: mpsc::UnboundedSender<String>) {
+        let mut lines = BufReader::new(reader).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let _ = tx.send(line);
         }
     }
-}
-
-/// 两个管道都要读：cloudflared 会同时往 stdout 和 stderr 写，
-/// 只读一个会让另一个写满管道后把它卡死。
-/// 返回 (匹配到的地址, 进程退出前最后一条错误)。
-/// 只回「进程退出了」等于什么都没说——真实原因（限流、DNS、鉴权）就在日志里。
-async fn first_match<F>(
-    stdout: Option<tokio::process::ChildStdout>,
-    stderr: Option<tokio::process::ChildStderr>,
-    match_line: F,
-) -> (Option<String>, Option<String>)
-where
-    F: Fn(&str) -> Option<String>,
-{
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (tx, rx) = mpsc::unbounded_channel();
     if let Some(s) = stdout {
-        tokio::spawn(drain(s, tx.clone()));
+        tokio::spawn(pipe(s, tx.clone()));
     }
     if let Some(s) = stderr {
-        tokio::spawn(drain(s, tx.clone()));
+        tokio::spawn(pipe(s, tx));
     }
-    drop(tx);
+    rx
+}
+
+/// 等到第一条带地址的日志。进程先退出就返回它报的第一条错误：
+/// 只回「进程退出了」等于什么都没说——真实原因（限流、DNS、鉴权）就在日志里
+async fn first_match(lines: &mut mpsc::UnboundedReceiver<String>) -> Result<String, Option<String>> {
     let mut detail = None;
-    while let Some(line) = rx.recv().await {
-        if let Some(origin) = match_line(&line) {
-            return (Some(origin), detail);
+    while let Some(line) = lines.recv().await {
+        if let Some(origin) = quick_origin(&line) {
+            return Ok(origin);
         }
         if detail.is_none() && looks_like_error(&line) {
             detail = Some(readable(&line));
         }
     }
-    (None, detail)
+    Err(detail)
 }
 
 fn looks_like_error(line: &str) -> bool {
@@ -240,24 +197,10 @@ fn looks_like_error(line: &str) -> bool {
 
 /// json 日志取 msg 字段，纯文本日志截一段：两种情况都别把整行 json 甩给用户
 fn readable(line: &str) -> String {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-        if let Some(m) = v.get("msg").and_then(|m| m.as_str()) {
-            return m.to_string();
-        }
-    }
-    line.trim().chars().take(160).collect()
-}
-
-async fn drain<R>(reader: R, tx: tokio::sync::mpsc::UnboundedSender<String>)
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut lines = BufReader::new(reader).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        if tx.send(line).is_err() {
-            return;
-        }
-    }
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|v| v.get("msg")?.as_str().map(str::to_string))
+        .unwrap_or_else(|| line.trim().chars().take(160).collect())
 }
 
 /// 从任意一行日志里抠出 `https://<name>.trycloudflare.com`。
@@ -271,10 +214,7 @@ fn quick_origin(line: &str) -> Option<String> {
     let host = url.strip_prefix("https://")?.split('/').next()?;
     let label = host.strip_suffix(QUICK_DOMAIN)?;
     // 快速隧道名是几个单词用连字符拼的；这条判断排除 api.trycloudflare.com 之类
-    if label.is_empty() || !label.contains('-') {
-        return None;
-    }
-    if !label.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+    if !label.contains('-') || !label.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
         return None;
     }
     Some(format!("https://{host}"))
@@ -282,7 +222,7 @@ fn quick_origin(line: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::quick_origin;
+    use super::*;
 
     #[test]
     fn finds_origin_in_json_and_plain_text() {
@@ -297,5 +237,22 @@ mod tests {
         for line in ["https://api.trycloudflare.com/v1/health", "https://example.com", "INF Starting tunnel"] {
             assert_eq!(quick_origin(line), None, "line: {line}");
         }
+    }
+
+    /// 进程退出前只说了错误：要把第一条错误的 msg 带出来，而不是整行 json
+    #[tokio::test]
+    async fn reports_first_error_when_no_origin() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for line in [
+            r#"{"level":"info","msg":"Starting"}"#,
+            r#"{"level":"error","msg":"status code 429"}"#,
+            r#"{"level":"error","msg":"later"}"#,
+        ] {
+            tx.send(line.to_string()).unwrap();
+        }
+        drop(tx);
+        let detail = first_match(&mut rx).await.unwrap_err();
+        assert_eq!(detail.as_deref(), Some("status code 429"));
+        assert!(early_exit(detail).contains("429"));
     }
 }

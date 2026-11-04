@@ -1,8 +1,9 @@
 <script lang="ts">
-  let { title = "", sub = "", flush = false, children } = $props();
+  import type { Snippet } from "svelte";
+  let { title = "", sub = "", children }: { title?: string; sub?: string; children: Snippet } = $props();
 </script>
 
-<section class="card" class:flush>
+<section class="card">
   {#if title}
     <header>
       <h3>{title}</h3>
@@ -19,7 +20,6 @@
     border-radius: var(--r-lg);
     padding: 4px 16px;
   }
-  .card.flush { padding: 0; overflow: hidden; }
   header { padding: 14px 0 6px; }
   header h3 { margin: 0; }
   header p { margin: 3px 0 0; font-size: var(--fs-sub); color: var(--fg-3); line-height: 1.6; }

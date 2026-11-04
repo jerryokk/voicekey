@@ -1,6 +1,7 @@
-use crate::util::{data_file, rand_lower};
+use crate::util::{rand_lower, IdFile};
+use crate::ws::AbortOnDrop;
 use crate::{opus, Audio, Engine, Partial};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use flate2::write::DeflateEncoder;
 use flate2::{Crc, Compression};
@@ -8,7 +9,6 @@ use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::Write;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -19,9 +19,11 @@ const PID: i64 = 597;
 const KEY: &str = "com.baidu.input_nlu";
 const APP: &str = "com.baidu.input";
 const PACK: usize = 8;
+/// 下行帧长上限：正常 JSON 帧不过几 KB，超出说明流已错位
+const MAX_FRAME: usize = 1 << 20;
+const ID: IdFile = IdFile("baidu.json");
 
 /// 百度输入法云端 ASR：HTTP 分块 up/down + deflate JSON 首包 + Opus
-#[derive(Default)]
 pub struct BaiduEngine;
 
 fn pkt(typ: u8, payload: &[u8]) -> Vec<u8> {
@@ -83,65 +85,73 @@ fn start_pkt(sn: &str, cuid: &str) -> Result<Vec<u8>> {
     Ok(pkt(0, &payload))
 }
 
-fn word(v: &Value) -> Option<String> {
-    v["result"]["word"].as_array()?.first()?.as_str().map(str::to_string)
-}
+/// 下行帧：LE32(n) + 类型 1 字节 + 负载 n-1 字节
+struct Frames(Vec<u8>);
 
-#[derive(Default)]
-struct Transcript {
-    text: String,
-    err: Option<String>,
-    done: bool,
-}
-
-fn on_frame(t: &Mutex<Transcript>, typ: u8, body: &[u8], partial: &Partial) {
-    if typ == 244 || typ == 243 || body.is_empty() {
-        if typ == 243 {
-            t.lock().unwrap().done = true;
+impl Frames {
+    /// 取出下一个完整帧；数据不够返回 None，帧头非法（长度 0 或超限）报错
+    fn next(&mut self) -> Result<Option<(u8, Vec<u8>)>> {
+        let Some(head) = self.0.first_chunk::<4>() else { return Ok(None) };
+        let n = u32::from_le_bytes(*head) as usize;
+        if n == 0 || n > MAX_FRAME {
+            bail!("百度下行帧头非法（长度 {n}）");
         }
-        return;
-    }
-    let Ok(v) = serde_json::from_slice::<Value>(body) else { return };
-    if let Some(w) = word(&v) {
-        let mut g = t.lock().unwrap();
-        if w != g.text {
-            g.text = w.clone();
-            drop(g);
-            partial(&w);
+        if self.0.len() < 4 + n {
+            return Ok(None);
         }
-    }
-    let err_no = v["err_no"].as_i64().unwrap_or(0);
-    let kind = v["result_type"].as_str().unwrap_or("");
-    let mut g = t.lock().unwrap();
-    if err_no != 0 && g.text.is_empty() {
-        g.err = Some(v["err_msg"].as_str().unwrap_or("识别失败").to_string());
-        g.done = true;
-    }
-    if kind == "TS_RESULT_TYPE_ONEBSET" {
-        g.done = true;
+        let typ = self.0[4];
+        let body = self.0[5..4 + n].to_vec();
+        self.0.drain(..4 + n);
+        Ok(Some((typ, body)))
     }
 }
 
-#[derive(Serialize, Deserialize, Default)]
-struct Dev {
-    cuid: String,
-}
+/// 下行帧类型
+const T_RESULT: u8 = 240;
+const T_FINAL: u8 = 241;
+const T_END: u8 = 243;
 
-impl Dev {
-    fn load() -> Self {
-        let p = data_file("baidu.json");
-        if let Ok(s) = std::fs::read_to_string(&p) {
-            if let Ok(d) = serde_json::from_str::<Dev>(&s) {
-                if !d.cuid.is_empty() {
-                    return d;
+/// 收下行直到定稿：中间结果经 partial 回调，返回定稿文本（无有效语音为空串）
+async fn receive(down: impl std::future::Future<Output = reqwest::Result<reqwest::Response>>, partial: Partial) -> Result<String> {
+    let mut resp = down.await.context("百度下行失败")?;
+    if !resp.status().is_success() {
+        bail!("百度下行 HTTP {}", resp.status());
+    }
+    let mut frames = Frames(Vec::new());
+    let mut text = String::new();
+    while let Some(chunk) = resp.chunk().await.context("百度下行中断")? {
+        frames.0.extend_from_slice(&chunk);
+        while let Some((typ, body)) = frames.next()? {
+            match typ {
+                T_RESULT | T_FINAL => {
+                    let v: Value = serde_json::from_slice(&body).context("百度结果解析失败")?;
+                    match v["err_no"].as_i64() {
+                        Some(0) => {}
+                        // 没有检测到有效语音
+                        Some(-3005) => return Ok(String::new()),
+                        _ => bail!("百度{}（{}）", v["err_msg"].as_str().unwrap_or("识别失败"), v["err_no"]),
+                    }
+                    let w = v["result"]["word"][0].as_str().context("百度结果缺少 word")?;
+                    if typ == T_FINAL {
+                        return Ok(w.to_string());
+                    }
+                    if w != text {
+                        text = w.to_string();
+                        partial(&text);
+                    }
                 }
+                T_END => bail!("百度没有返回定稿"),
+                // 244 心跳、248 VAD 状态等
+                _ => {}
             }
         }
-        let hex = Uuid::new_v4().simple().to_string().to_uppercase();
-        let d = Dev { cuid: format!("{}|{}", hex, rand_lower(9).to_uppercase()) };
-        let _ = std::fs::write(p, serde_json::to_string(&d).unwrap_or_default());
-        d
     }
+    bail!("百度下行提前结束")
+}
+
+#[derive(Serialize, Deserialize)]
+struct Dev {
+    cuid: String,
 }
 
 #[async_trait::async_trait]
@@ -149,7 +159,11 @@ impl Engine for BaiduEngine {
     async fn run(&self, audio: Audio, partial: Partial) -> Result<String> {
         let mut audio = crate::audio::lead(audio);
         let sn = Uuid::new_v4().to_string();
-        let cuid = Dev::load().cuid;
+        let cuid = ID
+            .get_or_create(|| Dev {
+                cuid: format!("{}|{}", Uuid::new_v4().simple().to_string().to_uppercase(), rand_lower(9).to_uppercase()),
+            })?
+            .cuid;
         let client = reqwest::Client::builder().tcp_nodelay(true).http1_only().build()?;
         let down = client
             .post(format!("{HOST}/down?sn={sn}"))
@@ -166,77 +180,61 @@ impl Engine for BaiduEngine {
             .header("Content-Type", "application/octet-stream")
             .body(reqwest::Body::wrap_stream(stream))
             .send();
+        let mut up = AbortOnDrop(tokio::spawn(up));
+        let mut down = AbortOnDrop(tokio::spawn(receive(down, partial)));
 
-        tx.send(Bytes::from(start_pkt(&sn, &cuid)?)).map_err(|_| anyhow!("百度上传中断"))?;
-
-        let t = Arc::new(Mutex::new(Transcript::default()));
-        let t2 = t.clone();
-        let down_task = tokio::spawn(async move {
-            let mut resp = down.await.map_err(|e| anyhow!("百度下行失败：{e}"))?;
-            if !resp.status().is_success() {
-                bail!("百度下行 HTTP {}", resp.status());
-            }
-            let mut buf = Vec::new();
-            while let Some(chunk) = resp.chunk().await.map_err(|e| anyhow!("{e}"))? {
-                buf.extend_from_slice(&chunk);
-                loop {
-                    if buf.len() < 4 {
-                        break;
-                    }
-                    let n = u32::from_le_bytes(buf[..4].try_into().unwrap()) as usize;
-                    if n == 0 || n > 1_000_000 || buf.len() < 4 + n {
-                        break;
-                    }
-                    let fr = buf[4..4 + n].to_vec();
-                    buf.drain(..4 + n);
-                    on_frame(&t2, fr[0], &fr[1..], &partial);
-                }
-                if t2.lock().unwrap().done {
-                    break;
-                }
-            }
-            Ok::<(), anyhow::Error>(())
-        });
-
-        let up_task = tokio::spawn(async move {
-            up.await.map_err(|e| anyhow!("百度上行失败：{e}"))
-        });
-
-        tx.send(Bytes::from(pkt(5, br#"{"realtime-log":"INPUT&a1&13.3.16.2&0&com.baidu.input"}"#))).ok();
+        // 上行请求失败时 rx 随之丢弃，send 报错
+        let send = |p: Vec<u8>| tx.send(Bytes::from(p)).map_err(|_| anyhow!("百度上行中断"));
+        send(start_pkt(&sn, &cuid)?)?;
+        send(pkt(5, br#"{"realtime-log":"INPUT&a1&13.3.16.2&0&com.baidu.input"}"#))?;
 
         let mut enc = opus::Opus::baidu()?;
-        let mut batch = Vec::new();
-        let mut first = true;
+        // 首个音频包带 4 字节前缀
+        let mut batch = vec![0x44, 0, 0, 0];
         let mut n = 0usize;
         while let Some(frame) = audio.recv().await {
             batch.extend_from_slice(&enc.encode_bd(&frame)?);
             n += 1;
-            if n >= PACK {
-                let mut payload = Vec::with_capacity(4 + batch.len());
-                if first {
-                    first = false;
-                    payload.extend_from_slice(&[0x44, 0, 0, 0]);
-                }
-                payload.append(&mut batch);
-                tx.send(Bytes::from(pkt(1, &payload))).ok();
+            if n == PACK {
+                send(pkt(1, &batch))?;
+                batch.clear();
                 n = 0;
             }
         }
-        if !batch.is_empty() {
-            tx.send(Bytes::from(pkt(1, &batch))).ok();
+        if n > 0 {
+            send(pkt(1, &batch))?;
         }
-        tx.send(Bytes::from(pkt(9, &[]))).ok();
-        tx.send(Bytes::from(pkt(7, &[]))).ok();
+        send(pkt(9, &[]))?;
+        send(pkt(7, &[]))?;
+        // 关闭上行流（send 只借用 tx）
         drop(tx);
 
-        let _ = tokio::time::timeout(Duration::from_secs(12), up_task).await;
-        let _ = tokio::time::timeout(Duration::from_secs(8), down_task).await;
-        let g = t.lock().unwrap();
-        if let Some(e) = &g.err {
-            if g.text.is_empty() {
-                bail!("百度{e}");
-            }
+        let text = tokio::time::timeout(Duration::from_secs(8), &mut down).await.map_err(|_| anyhow!("百度定稿超时"))???;
+        let resp = tokio::time::timeout(Duration::from_secs(4), &mut up).await.map_err(|_| anyhow!("百度上行超时"))??.context("百度上行失败")?;
+        if !resp.status().is_success() {
+            bail!("百度上行 HTTP {}", resp.status());
         }
-        Ok(g.text.clone())
+        Ok(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frames_split_and_wait_for_more() {
+        let mut f = Frames([pkt(240, b"ab"), pkt(243, &[])[..3].to_vec()].concat());
+        assert_eq!(f.next().unwrap(), Some((240, b"ab".to_vec())));
+        assert_eq!(f.next().unwrap(), None);
+        f.0.extend_from_slice(&pkt(243, &[])[3..]);
+        assert_eq!(f.next().unwrap(), Some((243, vec![])));
+        assert_eq!(f.next().unwrap(), None);
+    }
+
+    #[test]
+    fn bad_header_is_error_not_stall() {
+        assert!(Frames(vec![0, 0, 0, 0, 9]).next().is_err());
+        assert!(Frames(u32::MAX.to_le_bytes().to_vec()).next().is_err());
     }
 }

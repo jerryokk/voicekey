@@ -3,17 +3,17 @@ name = "voicekey-remote"
 version.workspace = true
 edition.workspace = true
 
-# 手机接入层：只依赖 core，不依赖 tauri，便于单独测试
+# 手机接入层：不依赖 tauri，便于单独测试。core 提供音频帧约定，opus-sys 解手机的 Opus 流
 [dependencies]
 voicekey-core = { path = "../core" }
 axum = { version = "0.8", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "net", "process", "io-util", "sync", "time"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 webrtc = "0.17.2"
 opus-sys = { path = "../opus-sys" }
-
-# 作业对象：进程无论怎么退都要带走 cloudflared
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects"] }
+# 二维码 token：拿到它就能操作这台电脑的键鼠，必须来自系统 CSPRNG
+getrandom = "=0.3.4"
+# 作业对象：进程无论怎么退都要带走 cloudflared。与 platform 用同一个版本
+windows = { version = "0.62", features = ["Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

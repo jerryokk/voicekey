@@ -30,7 +30,7 @@ extern "C" {
 /// ctl 请求编号，取值来自 opus.h 的宏（与 ABI 无关，纯协议约定）
 pub const OPUS_SET_BITRATE_REQUEST: c_int = 4002;
 pub const OPUS_SET_COMPLEXITY_REQUEST: c_int = 4010;
-pub const OPUS_SET_VBR_REQUEST: c_int = 4008;
+pub const OPUS_SET_VBR_REQUEST: c_int = 4006;
 pub const OPUS_GET_FINAL_RANGE_REQUEST: c_int = 4031;
 
 #[cfg(test)]
@@ -44,16 +44,18 @@ mod tests {
             let mut err: c_int = 0;
             let enc = opus_encoder_create(16000, 1, 2048 /* VOIP */, &mut err);
             assert!(!enc.is_null() && err == 0);
-            opus_encoder_ctl(enc, OPUS_SET_BITRATE_REQUEST, 24000i32);
+            assert_eq!(opus_encoder_ctl(enc, OPUS_SET_BITRATE_REQUEST, 24000i32), 0);
+            assert_eq!(opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY_REQUEST, 10i32), 0);
+            assert_eq!(opus_encoder_ctl(enc, OPUS_SET_VBR_REQUEST, 0i32), 0);
 
-            // 320 样本（20ms @16k）的 440Hz 正弦
+            // 320 样本（20ms @16k）的约 350Hz 正弦：0.1373 rad/样本 × 16000 / 2π
             let pcm: Vec<i16> = (0..320).map(|i| ((i as f32) * 0.1373f32).sin() * 8000.0).map(|v| v as i16).collect();
             let mut out = [0u8; 4000];
             let n = opus_encode(enc, pcm.as_ptr(), 320, out.as_mut_ptr(), 4000);
             assert!(n > 0, "encode 失败: {n}");
 
             let mut range: u32 = 0;
-            opus_encoder_ctl(enc, OPUS_GET_FINAL_RANGE_REQUEST, &mut range);
+            assert_eq!(opus_encoder_ctl(enc, OPUS_GET_FINAL_RANGE_REQUEST, &mut range), 0);
             assert_ne!(range, 0, "编码器没有给出 range（bitstream 校验值）");
             opus_encoder_destroy(enc);
 

@@ -3,6 +3,3 @@ name = "opus-sys"
 version.workspace = true
 edition.workspace = true
 links = "opus"
-
-[build-dependencies]
-# 无依赖：build.rs 只输出链接指令

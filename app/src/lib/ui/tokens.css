@@ -16,7 +16,6 @@
 
   /* 语义色 */
   --accent: #d9552b;
-  --accent-2: #ffa06a;
   --accent-soft: rgba(217, 85, 43, 0.10);
   --ok: #1d9e75;
   --warn: #b07d10;
@@ -38,7 +37,6 @@
   --font: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
   --mono: "Cascadia Mono", "Consolas", monospace;
 
-  --shadow-pop: 0 12px 32px rgba(24, 22, 16, 0.16), 0 2px 6px rgba(24, 22, 16, 0.08);
   color-scheme: light;
 }
 
@@ -61,6 +59,5 @@
   --err: #e2685a;
   --err-soft: rgba(226, 104, 90, 0.12);
 
-  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3);
   color-scheme: dark;
 }
