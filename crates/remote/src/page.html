@@ -218,6 +218,71 @@
     -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
   }
 
+  /* 顶栏右上角的「发到电脑」入口 */
+  #more {
+    flex: none; width: 32px; height: 28px; margin-left: 2px; border-radius: 9px;
+    display: grid; place-items: center; color: var(--fg-2);
+    border: 1px solid var(--line-2); background: var(--card);
+  }
+  #more svg { width: 16px; height: 16px; }
+  #more.off { opacity: .35; pointer-events: none; }
+  #more.busy { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+
+  /* 底部操作面板 */
+  #sheet { position: fixed; inset: 0; z-index: 8; }
+  #sheet .scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, .28); animation: fade .18s ease; }
+  #sheet .panel {
+    position: absolute; left: 0; right: 0; bottom: 0; touch-action: pan-y;
+    padding: 16px 16px calc(18px + env(safe-area-inset-bottom));
+    background: var(--card); border-radius: 22px 22px 0 0; box-shadow: 0 -12px 32px -20px rgba(0, 0, 0, .5);
+    animation: rise .24s cubic-bezier(.22, .68, .36, 1);
+  }
+  @keyframes fade { from { opacity: 0; } }
+  @keyframes rise { from { transform: translateY(40px); opacity: 0; } }
+  .head { display: flex; align-items: center; gap: 8px; min-height: 32px; }
+  .head b { flex: 1; font-size: 15px; font-weight: 600; }
+  .head .x { width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center; color: var(--fg-2); }
+  .head .x svg { width: 18px; height: 18px; }
+  .acts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; margin-top: 12px; }
+  .acts button {
+    display: flex; flex-direction: column; align-items: center; gap: 7px; padding: 13px 0 11px;
+    border-radius: 16px; background: var(--card-2); border: 1px solid var(--line); font-size: 12.5px; color: var(--fg-2);
+  }
+  .acts button:active { transform: scale(.97); }
+  .acts .ic { width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center; background: var(--card); color: var(--fg); border: 1px solid var(--line); }
+  .acts svg { width: 20px; height: 20px; }
+  #sheet .tip { margin: 12px 2px 0; font-size: 12px; color: var(--fg-3); }
+
+  /* 传输队列 */
+  #queue { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; max-height: 30vh; overflow-y: auto; }
+  #queue:empty { display: none; }
+  .job { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 12px; background: var(--card-2); border: 1px solid var(--line); font-size: 13px; }
+  .job .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .job .p { color: var(--fg-3); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .job .bar { grid-column: 1 / -1; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
+  .job .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s linear; }
+  .job.done .bar i { background: var(--ok); }
+  .job.fail .p { color: var(--err); }
+  .job .c { width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; color: var(--fg-3); }
+  .job .c svg { width: 14px; height: 14px; }
+  .job.done .c, .job.fail .c { visibility: hidden; }
+
+  /* 发文字 */
+  #compose {
+    position: fixed; inset: 0; z-index: 11; display: flex; flex-direction: column; gap: 10px; background: var(--bg);
+    padding: calc(12px + env(safe-area-inset-top)) 14px calc(14px + env(safe-area-inset-bottom));
+  }
+  #composeSend { padding: 7px 16px; border-radius: 999px; background: var(--key); color: var(--key-fg); font-size: 14px; }
+  #composeSend:disabled { opacity: .35; }
+  #composeHint { margin: 0; padding: 9px 12px; border-radius: 12px; font-size: 13px; line-height: 1.6; background: var(--accent-soft); }
+  #composeText {
+    flex: 1; width: 100%; resize: none; padding: 14px 15px; border-radius: 16px; outline: none;
+    border: 1px solid var(--line-2); background: var(--card); color: var(--fg);
+    font: 16px/1.7 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-user-select: text; user-select: text; touch-action: pan-y;
+  }
+  #composeText:focus { border-color: color-mix(in srgb, var(--fg) 40%, transparent); }
+
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
   }
@@ -231,6 +296,11 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10"/>
       </svg>扫码
+    </button>
+    <button id="more" class="off" aria-label="发到电脑" aria-haspopup="dialog">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4M12 15V4M7.5 8.5L12 4l4.5 4.5"/>
+      </svg>
     </button>
   </div>
 
@@ -271,6 +341,39 @@
   </div>
 </div>
 
+<!-- 发到电脑：底部弹出的操作面板。传输走直连的 xfer 通道，录音、触摸板照常 -->
+<div id="sheet" class="hide" role="dialog" aria-labelledby="sheetTitle">
+  <div class="scrim" id="sheetScrim"></div>
+  <div class="panel">
+    <div class="head"><b id="sheetTitle">发到电脑</b><button class="x" id="sheetClose" aria-label="关闭">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button></div>
+    <div class="acts">
+      <button data-act="clip"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="3" width="8" height="4" rx="1"/><path d="M8 5H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/></svg></span>剪贴板</button>
+      <button data-act="text"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V5h16v2M9 19h6M12 5v14"/></svg></span>文字</button>
+      <button data-act="image"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/></svg></span>图片</button>
+      <button data-act="file"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg></span>文件</button>
+    </div>
+    <p class="tip">图片和文件会存到电脑的「下载」文件夹</p>
+    <div id="queue"></div>
+  </div>
+  <input type="file" id="pickImage" accept="image/*" multiple hidden>
+  <input type="file" id="pickFile" multiple hidden>
+</div>
+
+<!-- 发文字：全屏编辑，也是读不到剪贴板时的退路 -->
+<div id="compose" class="hide" role="dialog" aria-labelledby="composeTitle">
+  <div class="head">
+    <button class="x" id="composeClose" aria-label="返回">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+    </button>
+    <b id="composeTitle">发文字到电脑</b>
+    <button id="composeSend" disabled>发送</button>
+  </div>
+  <p id="composeHint" class="hide"></p>
+  <textarea id="composeText" placeholder="输入或粘贴要发到电脑的文字" aria-labelledby="composeTitle"></textarea>
+</div>
+
 <div id="lost" class="gate hide" role="alertdialog" aria-labelledby="lostTitle">
   <div class="mark">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
@@ -296,7 +399,7 @@
       <rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>
     </svg>
   </div>
-  <p>需要允许麦克风。<br>电脑只在你按住按钮时识别声音。</p>
+  <p>需要允许麦克风。<br>麦克风只在你按住按钮时打开。</p>
   <button id="enable">启用麦克风</button>
 </div>
 
@@ -312,7 +415,8 @@ const errText = (e) => (e && e.message ? e.message : String(e));
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // ---- 链路：WS 走隧道做信令，音频与触摸板都走 WebRTC 直连 ----
-let ws = null, pc = null, dc = null, stream = null, track = null;
+let ws = null, pc = null, dc = null, xc = null, sender = null;
+let micOk = false;              // 用户已授权麦克风。麦克风本身只在按住时开着，见「麦克风」一节
 let ice = [], linked = false, kicked = false, offerId = 0;
 let lostAt = 0;                 // 这次断线从什么时候开始，0 表示连着
 const RESCAN_AFTER = 4000;      // 断线超过这么久才露出扫码入口：一两秒的网络抖动不该打扰人
@@ -325,12 +429,14 @@ function refresh() {
   const ok = ready();
   padEl.classList.toggle('off', !ok);
   talkEl.classList.toggle('off', !ok);
+  $('more').classList.toggle('off', !xferReady());
+  $('more').classList.toggle('busy', jobs.length > 0);
   // 断了一会儿还没连上：电脑多半重启过、地址已经变了，给出扫码入口，但继续重连
   const stale = !kicked && lostAt && Date.now() - lostAt >= RESCAN_AFTER;
   $('rescan').classList.toggle('hide', !stale);
   if (kicked) setState('电脑已断开', false);
   else if (!ws || ws.readyState !== 1) setState('正在连接电脑…', false);
-  else if (!stream) setState('等待麦克风授权', false);
+  else if (!micOk) setState('等待麦克风授权', false);
   else if (!ok) setState('正在建立直连…', false);
   else setState(active ? '录音中' : '已连接', true);
 }
@@ -377,7 +483,7 @@ function onMessage(m) {
     case 'busy':
       // 服务端没受理，这一句不归我：不发 stop，只把界面放回去
       finish(null);
-      note('另一台手机正在说话，等它说完再按', 2400);
+      note('电脑或另一台手机正在说话，等它说完再按', 2400);
       break;
     case 'partial':
       setText(m.text, false);
@@ -406,6 +512,8 @@ function onMessage(m) {
       // 电脑换了二维码（主动断开，或者这是一张旧码）：这个地址再也连不上，只剩重新扫码一条路
       kicked = true;
       hideRows();
+      closeSheet();
+      closeCompose();
       $('lost').classList.remove('hide');
       ws.close();
       break;
@@ -413,16 +521,25 @@ function onMessage(m) {
 }
 
 // 页面就绪即建直连：ICE 收集与 DTLS 握手要几百毫秒，不能等按下那一刻再做。
-// 音轨一直开着，电脑端平时只留最近半秒当预录，按下那一刻之前的字头不会被吃掉
+// 音频通道先空着：按下时才打开麦克风、把音轨换进去，松手就摘下并关掉，不用重新协商
 async function link() {
-  if (!stream || !ice.length || !ws || ws.readyState !== 1) return;
+  if (!micOk || !ice.length || !ws || ws.readyState !== 1) return;
   dropRtc();
   const p = new RTCPeerConnection({ iceServers: ice });
   pc = p;
-  p.addTrack(track, stream);
+  sender = p.addTransceiver('audio', { direction: 'sendonly' }).sender;
+  // 说到一半直连重建：正开着的麦克风接到新通道上
+  if (mic) sender.replaceTrack(mic).catch(() => {});
   // 触摸板要求有序可靠：按下 / 松开丢一个就是一次卡死的拖拽
   dc = p.createDataChannel('input', { ordered: true });
   dc.onopen = dc.onclose = refresh;
+  // 发到电脑单独一条：传大文件时触摸板的消息不能排在它后面
+  xc = p.createDataChannel('xfer', { ordered: true });
+  xc.binaryType = 'arraybuffer';
+  xc.bufferedAmountLowThreshold = XFER_LOW;
+  xc.onopen = refresh;
+  xc.onclose = () => { xferLost(); refresh(); };
+  xc.onmessage = onXferReply;
   p.onconnectionstatechange = () => {
     if (pc !== p) return;
     linked = p.connectionState === 'connected';
@@ -468,7 +585,8 @@ function dropRtc() {
   clearTimeout(relinkTimer);
   relinkTimer = 0;
   if (pc) pc.close();
-  pc = null; dc = null; linked = false;
+  pc = null; dc = null; xc = null; sender = null; linked = false;
+  xferLost();
 }
 
 // ---- 文字区与提示 ----
@@ -508,7 +626,7 @@ function renderRows(m) {
     const shaking = el.classList.contains('shake');
     el.className = `row ${r.state}` + (i === m.sel ? ' sel' : '') + (shaking ? ' shake' : '');
     el.children[0].textContent = r.name;
-    el.children[1].textContent = r.text || '\u00a0'; // 空文字也撑住行高
+    el.children[1].textContent = r.text || '\u00a0'; // 空文字也撑住行高
   });
 }
 rowsEl.addEventListener('click', (e) => {
@@ -539,14 +657,16 @@ function begin() {
   if (active) return;
   // 另一根手指还按着退格在连删：录音中不能再删
   delStop();
-  if (!ready()) { note(stream ? '还在建立直连，稍等一下' : '先启用麦克风', 2000); return; }
+  if (!ready()) { note(micOk ? '还在建立直连，稍等一下' : '先启用麦克风', 2000); return; }
   active = true; armed = false; t0 = Date.now();
   before = textEl.classList.contains('ph') ? '' : textEl.textContent;
   setPhase('rec');
-  waveOn();
   hintEl.textContent = '0.0 秒';
   timer = setInterval(() => { hintEl.textContent = ((Date.now() - t0) / 1000).toFixed(1) + ' 秒'; }, 100);
   send({ op: 'start' });
+  // 按下是一次用户手势，趁现在恢复被系统挂起的 AudioContext
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+  micOn();
   refresh();
 }
 
@@ -556,7 +676,7 @@ function finish(op) {
   active = false; armed = false;
   clearInterval(timer);
   hintEl.textContent = '';
-  waveOff();
+  micOff();
   setPhase('idle');
   if (op) send({ op });
   refresh();
@@ -882,7 +1002,7 @@ padEl.addEventListener('contextmenu', (e) => e.preventDefault());
 
 function buzz(ms) { if (navigator.vibrate) navigator.vibrate(ms); }
 
-// 切走页面：说到一半的照常定稿，拖拽中的键放开
+// 切走页面：说到一半的照常定稿，拖拽中的键放开。传输不停——选文件、切去复制东西都会切走页面
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) return;
   finish('stop');
@@ -890,39 +1010,299 @@ document.addEventListener('visibilitychange', () => {
   stopScan();
 });
 
-// ---- 麦克风 ----
-let audioCtx = null, source = null;
-async function startAudio() {
-  stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      channelCount: 1,
-      // 浏览器默认的降噪会吃掉小声说话的开头，识别引擎自己会处理噪声
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: true,
-    },
-  });
-  track = stream.getAudioTracks()[0];
-  // 麦克风被系统收走（别的应用占用、权限撤销）：直连里的音轨已经哑了，得重新授权
-  track.onended = () => {
-    finish('stop');
-    dropRtc();
-    stream = track = null;
-    $('gate').querySelector('p').textContent = '麦克风被系统关闭了，请重新启用。';
-    $('gate').classList.remove('hide');
-    refresh();
-  };
-  // 重新授权时复用同一个 AudioContext，只换输入源：浏览器对同时存在的 context 数量有上限
-  audioCtx = audioCtx || new AudioContext();
-  if (audioCtx.state === 'suspended') await audioCtx.resume();
-  if (source) source.disconnect();
-  if (!analyser) {
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 512;
-    samples = new Float32Array(analyser.fftSize);
+// ---- 发到电脑：走直连的 xfer 通道，一项一项按顺序发 ----
+// 每项：begin（文本帧）→ 若干 16KB 二进制块 → end。电脑回 ok / fail。
+// 文字、剪贴板也走同一条路，长文本不会撞上单条消息的上限
+const XFER_CHUNK = 16 * 1024;
+const XFER_HIGH = 1 << 20, XFER_LOW = 256 * 1024;   // 发送缓冲背压：超过 1MB 就等它降到 256KB
+const sheetEl = $('sheet'), queueEl = $('queue'), composeEl = $('compose'), composeText = $('composeText');
+let jobs = [], jobSeq = 0, batchSeq = 0, sending = false;
+
+function xferReady() { return linked && xc !== null && xc.readyState === 'open'; }
+
+function openSheet() { if (xferReady()) { sheetEl.classList.remove('hide'); } }
+function closeSheet() { sheetEl.classList.add('hide'); }
+$('more').onclick = openSheet;
+$('sheetClose').onclick = $('sheetScrim').onclick = closeSheet;
+
+function size(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1 << 20) return (n / 1024).toFixed(0) + ' KB';
+  return (n / (1 << 20)).toFixed(1) + ' MB';
+}
+
+// 队列里的一行：只给文件显示（文字、剪贴板一瞬间就发完，结果走提示条）
+function jobRow(j) {
+  const el = document.createElement('div');
+  el.className = 'job';
+  const n = document.createElement('span'), p = document.createElement('span'), c = document.createElement('button');
+  n.className = 'n'; p.className = 'p'; c.className = 'c';
+  n.textContent = j.name;
+  c.setAttribute('aria-label', '取消');
+  c.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+  c.onclick = () => cancelJob(j);
+  const bar = document.createElement('span');
+  bar.className = 'bar';
+  bar.append(document.createElement('i'));
+  el.append(n, p, c, bar);
+  queueEl.append(el);
+  return el;
+}
+
+function showProgress(j) {
+  if (!j.el) return;
+  const pct = j.size ? Math.min(100, Math.round(j.sent / j.size * 100)) : 100;
+  j.el.querySelector('.p').textContent = j.state === 'fail' ? '失败' : j.state === 'done' ? '已发送' : pct + '%';
+  j.el.querySelector('.bar i').style.width = pct + '%';
+}
+
+// 收尾一项：成功、失败、取消。文件行留一会儿再消失，让人看见结果
+function settle(j, state, message) {
+  if (j.state === 'done' || j.state === 'fail') return;
+  j.state = state;
+  jobs = jobs.filter((x) => x !== j);
+  showProgress(j);
+  if (j.el) {
+    j.el.classList.add(state);
+    setTimeout(() => j.el.remove(), state === 'done' ? 1500 : 4000);
   }
-  source = audioCtx.createMediaStreamSource(stream);
-  source.connect(analyser);
+  if (state === 'fail' && message) note(message, 6000);
+  if (state === 'done' && j.kind !== 'file') note(j.kind === 'clip' ? '已写入电脑剪贴板' : '已发到电脑', 1800);
+  if (state === 'done' && j.kind === 'file' && j.last) note(j.of > 1 ? `${j.of} 个文件已发到电脑` : '已发到电脑', 1800);
+  j.resolve && j.resolve();
+  refresh();
+}
+
+function onXferReply(e) {
+  let m; try { m = JSON.parse(e.data); } catch { return; }
+  const j = jobs.find((x) => x.id === m.id);
+  if (!j) return;
+  if (m.k === 'ok') settle(j, 'done');
+  else if (m.k === 'fail') settle(j, 'fail', '电脑没收下：' + m.message);
+}
+
+// 直连断了：没发完的都算失败，重连后用户自己再发一次
+function xferLost() {
+  for (const j of [...jobs]) settle(j, 'fail', '直连断开，没发完的请重新发送');
+  sending = false;
+}
+
+function cancelJob(j) {
+  if (j.state === 'done' || j.state === 'fail') return;
+  if (j.state === 'sending' && xc && xc.readyState === 'open') xc.send(JSON.stringify({ k: 'abort', id: j.id }));
+  j.cancelled = true;
+  settle(j, 'fail');
+  j.el && (j.el.querySelector('.p').textContent = '已取消');
+}
+
+function drained() {
+  return new Promise((resolve) => {
+    if (!xc || xc.bufferedAmount <= XFER_LOW) return resolve();
+    const ch = xc;
+    const done = () => { ch.removeEventListener('bufferedamountlow', done); ch.removeEventListener('close', done); resolve(); };
+    ch.addEventListener('bufferedamountlow', done);
+    ch.addEventListener('close', done);
+  });
+}
+
+// 图片的缩略图：电脑端直接显示它，不必自己解码（也绕开了 iPhone 的 HEIC）
+async function thumbOf(file) {
+  if (!file.type.startsWith('image/')) return undefined;
+  try {
+    const img = await createImageBitmap(file);
+    const k = Math.min(1, 256 / Math.max(img.width, img.height));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(img.width * k));
+    c.height = Math.max(1, Math.round(img.height * k));
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    img.close && img.close();
+    return c.toDataURL('image/jpeg', 0.72);
+  } catch { return undefined; }
+}
+
+async function sendJob(j) {
+  const ch = xc;
+  if (!xferReady()) return settle(j, 'fail', '直连还没建立');
+  j.state = 'sending';
+  const bytes = j.text !== undefined ? new TextEncoder().encode(j.text) : null;
+  j.size = bytes ? bytes.length : j.file.size;
+  const head = { k: 'begin', id: j.id, kind: j.kind, size: j.size, batch: j.batch, of: j.of };
+  if (j.file) {
+    head.name = j.file.name;
+    if (j.file.type) head.mime = j.file.type;
+    const t = await thumbOf(j.file);
+    if (t) head.thumb = t;
+  }
+  // 生成缩略图期间被取消：那次 abort 电脑还不认识这一项，begin 就不能再发
+  if (j.cancelled || ch.readyState !== 'open') return;
+  try {
+    ch.send(JSON.stringify(head));
+    for (let at = 0; at < j.size; at += XFER_CHUNK) {
+      if (j.cancelled || ch.readyState !== 'open') return;
+      if (ch.bufferedAmount > XFER_HIGH) await drained();
+      const end = Math.min(j.size, at + XFER_CHUNK);
+      ch.send(bytes ? bytes.subarray(at, end) : await j.file.slice(at, end).arrayBuffer());
+      j.sent = end;
+      showProgress(j);
+    }
+    if (j.cancelled || ch.readyState !== 'open') return;
+    ch.send(JSON.stringify({ k: 'end', id: j.id }));
+    j.state = 'wait';
+  } catch (e) {
+    settle(j, 'fail', '发送失败：' + errText(e));
+  }
+}
+
+// 逐个发：前一项等到电脑回话再发下一项，一组文件不会互相穿插
+async function pumpJobs() {
+  if (sending) return;
+  sending = true;
+  while (sending) {
+    const j = jobs.find((x) => x.state === 'queued');
+    if (!j) break;
+    const answered = new Promise((r) => (j.resolve = r));
+    await sendJob(j);
+    if (j.state === 'sending' || j.state === 'wait') await answered;
+  }
+  sending = false;
+  refresh();
+}
+
+function enqueue(kind, items) {
+  const batch = ++batchSeq;
+  items.forEach((it, i) => {
+    const j = { id: ++jobSeq, kind, batch, of: items.length, last: i === items.length - 1, state: 'queued', sent: 0, size: 0, ...it };
+    j.name = j.file ? j.file.name : '';
+    if (j.file) { j.size = j.file.size; j.el = jobRow(j); showProgress(j); }
+    jobs.push(j);
+  });
+  refresh();
+  pumpJobs();
+}
+
+// 剪贴板：能读就直接发；浏览器不让读（权限、iOS 拒绝、没有内容）就打开文字框让用户粘贴，发出去照样写进电脑剪贴板
+async function sendClipboard() {
+  let text = '';
+  try { text = await navigator.clipboard.readText(); } catch {}
+  if (text) { closeSheet(); enqueue('clip', [{ text }]); return; }
+  openCompose('clip', '读不到手机剪贴板：长按下面的输入框粘贴进来，再点发送');
+}
+
+let composeKind = 'text';
+function openCompose(kind, hint) {
+  composeKind = kind;
+  closeSheet();
+  $('composeTitle').textContent = kind === 'clip' ? '写入电脑剪贴板' : '发文字到电脑';
+  $('composeHint').textContent = hint || '';
+  $('composeHint').classList.toggle('hide', !hint);
+  composeEl.classList.remove('hide');
+  composeText.focus();
+  composeInput();
+}
+function closeCompose() { composeEl.classList.add('hide'); composeText.blur(); }
+function composeInput() { $('composeSend').disabled = !composeText.value || !xferReady(); }
+composeText.addEventListener('input', composeInput);
+$('composeClose').onclick = closeCompose;
+$('composeSend').onclick = () => {
+  const text = composeText.value;
+  if (!text || !xferReady()) return;
+  enqueue(composeKind, [{ text }]);
+  composeText.value = '';
+  closeCompose();
+};
+
+function pickFiles(input, kind) {
+  input.onchange = () => {
+    const files = [...input.files];
+    input.value = '';
+    if (files.length) enqueue(kind, files.map((file) => ({ file })));
+  };
+  input.click();
+}
+
+sheetEl.querySelector('.acts').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  const act = b.dataset.act;
+  if (act === 'clip') sendClipboard();
+  else if (act === 'text') openCompose('text');
+  else if (act === 'image') pickFiles($('pickImage'), 'file');
+  else if (act === 'file') pickFiles($('pickFile'), 'file');
+});
+
+// ---- 麦克风：只在按住时开着 ----
+// 按下才打开、换进直连的音频通道；松手就摘下并关掉，状态栏的麦克风标志只在说话时亮。
+// 按下时先发 start 再开麦：音频走直连、start 绕隧道，声音先到也不要紧，电脑端会把它接进这一句
+const MIC = {
+  audio: {
+    channelCount: 1,
+    // 浏览器默认的降噪会吃掉小声说话的开头，识别引擎自己会处理噪声
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: true,
+  },
+};
+let mic = null;                 // 正开着的麦克风音轨
+let micSeq = 0;                 // 每次开、关都加一：getUserMedia 回来时对不上号，说明已经松手了
+let audioCtx = null, source = null;
+
+function gateAgain(text) {
+  micOk = false;
+  dropRtc();
+  $('gate').querySelector('p').textContent = text;
+  $('gate').classList.remove('hide');
+  refresh();
+}
+
+async function micOn() {
+  const seq = ++micSeq;
+  let t;
+  try {
+    t = (await navigator.mediaDevices.getUserMedia(MIC)).getAudioTracks()[0];
+  } catch (e) {
+    if (seq !== micSeq) return;
+    finish('cancel');
+    // 权限被收回，或者麦克风被别的应用占着
+    if (e && e.name === 'NotAllowedError') gateAgain('麦克风权限被关掉了，请重新启用。');
+    else note('麦克风打开失败：' + errText(e), 5000);
+    return;
+  }
+  if (seq !== micSeq) { t.stop(); return; }
+  mic = t;
+  // 说到一半被系统收走（来电、别的应用抢占）：按松手处理，已经说的照常识别
+  t.onended = () => { if (mic === t) finish('stop'); };
+  if (sender) sender.replaceTrack(t).catch(() => {});
+  if (!audioCtx) return;
+  try {
+    source = audioCtx.createMediaStreamSource(new MediaStream([t]));
+    source.connect(analyser);
+    waveOn();
+  } catch {}
+}
+
+function micOff() {
+  micSeq++;
+  waveOff();
+  if (source) { source.disconnect(); source = null; }
+  if (sender) sender.replaceTrack(null).catch(() => {});
+  if (mic) { mic.onended = null; mic.stop(); mic = null; }
+}
+
+// 启用：只为拿到授权，拿到就关。之后每次按住再开
+async function startAudio() {
+  // 波形用的 AudioContext 只建一个（浏览器限数量），在点击的同步部分建；挂起了在下次按下时 resume
+  try {
+    audioCtx = audioCtx || new AudioContext();
+    if (!analyser) {
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      samples = new Float32Array(analyser.fftSize);
+    }
+    audioCtx.resume().catch(() => {});
+  } catch {}
+  const s = await navigator.mediaDevices.getUserMedia(MIC);
+  s.getTracks().forEach((t) => t.stop());
+  micOk = true;
   link();
 }
 

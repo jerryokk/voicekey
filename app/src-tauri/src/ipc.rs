@@ -5,6 +5,8 @@
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::inbox;
+use crate::session::types::Msg;
 use crate::settings::{Channel, Patch, POINTER_SPEED};
 use crate::state::{download_model, update_settings, AppState};
 use crate::wtoffline;
@@ -24,6 +26,8 @@ pub fn get_state(app: AppHandle) -> serde_json::Value {
         "pointerSpeed": POINTER_SPEED,
         "models": { "wetypeoffline": wtoffline::status() },
         "last": st.last.read().unwrap().clone(),
+        "local": st.local_status.read().unwrap().clone(),
+        "inbox": inbox::list(),
         "remote": {
             "url": url,
             "qr": qr,
@@ -87,6 +91,73 @@ pub fn retry_remote() {
 #[tauri::command]
 pub async fn open_settings(app: AppHandle) {
     crate::ui::show_settings(&app);
+}
+
+/// 设置页的麦克风下拉：可用设备与系统默认那一个
+#[tauri::command]
+pub async fn list_mics() -> Result<serde_json::Value, String> {
+    let (mics, default) = tauri::async_runtime::spawn_blocking(voicekey_platform::mic::list)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.message)?;
+    let mics: Vec<_> = mics.into_iter().map(|m| json!({ "id": m.id, "name": m.name })).collect();
+    Ok(json!({ "mics": mics, "default": default }))
+}
+
+/// 设置页的「试听」：电平经 mic-level 事件推回来
+#[tauri::command]
+pub fn mic_test() {
+    crate::local::test();
+}
+
+/// 本机麦克风出错后的「重试」：结果经 local 事件推回来
+#[tauri::command]
+pub fn mic_retry() {
+    crate::local::retry();
+}
+
+/// Windows 隐私设置里「允许桌面应用访问麦克风」那一页
+#[tauri::command]
+pub fn open_mic_privacy() -> Result<(), String> {
+    std::process::Command::new("explorer")
+        .arg("ms-settings:privacy-microphone")
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打不开系统设置：{e}"))
+}
+
+/// 浮层候选（电脑本机说话 + 多渠道）里点了一行
+#[tauri::command]
+pub fn hud_choose(app: AppHandle, row: usize) {
+    let _ = app.state::<AppState>().tx.send(Msg::Choose(row));
+}
+
+#[tauri::command]
+pub fn inbox_items() -> Vec<inbox::Card> {
+    inbox::list()
+}
+
+#[tauri::command]
+pub fn inbox_copy(app: AppHandle, id: u64) -> Result<(), String> {
+    inbox::copy(&app, id)
+}
+
+#[tauri::command]
+pub fn inbox_reveal(app: AppHandle, id: u64) -> Result<(), String> {
+    inbox::reveal(&app, id)
+}
+
+#[tauri::command]
+pub fn inbox_dismiss(app: AppHandle, id: u64) {
+    inbox::dismiss(&app, id);
+}
+
+/// 收件面板量好了自己的内容高度：贴着右下角重摆
+#[tauri::command]
+pub fn inbox_resize(app: AppHandle, height: f64) {
+    if inbox::list().iter().any(|c| c.open) {
+        crate::ui::show_inbox(&app, height);
+    }
 }
 
 /// 二维码用 SVG 直接给前端：省掉一个前端依赖，也不怕离线加载不到库

@@ -52,7 +52,7 @@
 </Card>
 
 <Card title="关于">
-  <Row label={`VoiceKey ${info.version}`} desc="Windows · 手机当麦克风，识别在电脑上完成" />
+  <Row label={`VoiceKey ${info.version}`} desc="Windows · 按住说话，文字打进当前光标处" />
 </Card>
 
 <style>

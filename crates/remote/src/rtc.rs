@@ -1,13 +1,17 @@
-//! WebRTC 接收端：浏览器 offer → 本机 answer → 收 RTP(Opus) 解成 16k PCM，收 DataChannel 触摸板。
+//! WebRTC 接收端：浏览器 offer → 本机 answer → 收 RTP(Opus) 解成 16k PCM，
+//! 收 DataChannel `input`（触摸板）与 `xfer`（发到电脑）。
 //!
 //! 每台设备一条 PeerConnection、一个 [`Inbox`]。音频只进自己的 Inbox，
 //! 由 Hub 决定哪个 Inbox 被接进本句——别的设备的声音碰不到正在说的这一句。
 
-use crate::protocol::{self, Pad, PAD_CHANNEL};
-use std::sync::{Arc, Mutex};
+use crate::protocol::{self, Pad, PAD_CHANNEL, XFER_CHANNEL};
+use crate::xfer::{self, Received};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
+use webrtc::data_channel::RTCDataChannel;
 use tokio::sync::{broadcast, mpsc};
-use voicekey_core::audio::FRAME;
+use voicekey_core::audio::Inbox;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
@@ -21,60 +25,11 @@ use webrtc::peer_connection::RTCPeerConnection;
 /// 但先到的候选先进 SDP，弱网下这点差别能感觉到。
 pub const ICE: [&str; 2] = ["stun:stun.chat.bilibili.com:3478", "stun:stun.cloudflare.com:3478"];
 
-/// 没在说话时保留的最近音频：16kHz × 500ms。
-/// RTP 直连，`start` 绕隧道，后者常常晚到几百毫秒；没有这段，第一个字会被吃掉。
-const PREROLL: usize = 8_000;
-
 /// 一个 Opus 包最长 120ms，解到 16kHz 是 1920 个样本
 const MAX_PACKET_SAMPLES: usize = 16_000 * 120 / 1000;
 
 /// 收集本机候选的上限。STUN 不通时 webrtc-rs 要等它自己的超时，这里不陪它等
 const GATHER_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// 一台设备的音频入口
-#[derive(Default)]
-pub struct Inbox {
-    /// 样本与「正被接进本句」放在同一把锁里：收尾时取残余和退出 live 必须一步完成，
-    /// 中间插进来的样本要么属于这一句，要么属于下一句的预录，不能两头都不算
-    state: Mutex<State>,
-}
-
-#[derive(Default)]
-struct State {
-    pcm: Vec<i16>,
-    /// 不在说话时只留最近 [`PREROLL`] 个样本
-    live: bool,
-}
-
-impl Inbox {
-    pub fn push(&self, samples: &[i16]) {
-        let mut s = self.state.lock().unwrap();
-        s.pcm.extend_from_slice(samples);
-        if !s.live && s.pcm.len() > PREROLL {
-            let drop = s.pcm.len() - PREROLL;
-            s.pcm.drain(..drop);
-        }
-    }
-
-    /// 接进本句：从此不再裁剪，预录的那段成为这一句的开头
-    pub fn set_live(&self) {
-        self.state.lock().unwrap().live = true;
-    }
-
-    /// 取走所有整帧，不足一帧的余量留在原地等下一批。
-    /// `end` 时连余量也补零成一帧取走（否则最后一个字会被截掉），并退出 live
-    pub fn take(&self, end: bool) -> Vec<Vec<i16>> {
-        let mut s = self.state.lock().unwrap();
-        let len = s.pcm.len();
-        let whole = if end { len.div_ceil(FRAME) * FRAME } else { len / FRAME * FRAME };
-        s.pcm.resize(len.max(whole), 0);
-        let frames = s.pcm.drain(..whole).collect::<Vec<_>>().chunks(FRAME).map(<[i16]>::to_vec).collect();
-        if end {
-            s.live = false;
-        }
-        frames
-    }
-}
 
 /// 触摸板事件的去处，由 Hub 决定这台设备此刻有没有资格动鼠标
 pub type PadSink = Arc<dyn Fn(Pad) + Send + Sync>;
@@ -89,6 +44,7 @@ impl Receiver {
     pub async fn new(
         inbox: Arc<Inbox>,
         pad: PadSink,
+        xfer: XferSink,
         log: broadcast::Sender<String>,
         say: mpsc::WeakUnboundedSender<String>,
     ) -> Result<Self, String> {
@@ -113,7 +69,7 @@ impl Receiver {
             let log = track_log.clone();
             let say = say.clone();
             Box::pin(async move {
-                // 每个 track 一个解码器：Opus 是状态化的，跨 track 复用会带进前一句的预测状态
+                // 每个 track 一个解码器（Opus 有状态）。手机按住时 replaceTrack 换麦克风不产生新 track，各句共用它
                 let mut decoder = match Decoder::new() {
                     Ok(d) => d,
                     Err(e) => {
@@ -140,7 +96,11 @@ impl Receiver {
         connection.on_data_channel(Box::new(move |channel| {
             let pad = pad.clone();
             let log = log.clone();
+            let xfer = xfer.clone();
             Box::pin(async move {
+                if channel.label() == XFER_CHANNEL {
+                    return accept_xfer(channel, xfer);
+                }
                 if channel.label() != PAD_CHANNEL {
                     let _ = channel.close().await;
                     return;
@@ -176,6 +136,44 @@ impl Receiver {
     pub async fn close(&self) {
         let _ = self.connection.close().await;
     }
+}
+
+/// 收好的一项交给谁，以及存到哪
+#[derive(Clone)]
+pub struct XferSink {
+    pub dir: PathBuf,
+    pub done: Arc<dyn Fn(Received) + Send + Sync>,
+}
+
+/// 「发到电脑」通道。消息回调是逐条等完再收下一条的，写盘就在回调里同步做，顺序天然有保证。
+/// 通道关了（断线、页面重建直连）时正在收的那一项随接收端一起丢掉，半个文件不留
+fn accept_xfer(channel: Arc<RTCDataChannel>, sink: XferSink) {
+    let rx = Arc::new(StdMutex::new(xfer::Receiver::new(sink.dir.clone())));
+    let on_close = rx.clone();
+    channel.on_close(Box::new(move || {
+        on_close.lock().unwrap().discard();
+        Box::pin(async {})
+    }));
+    let reply_to = Arc::downgrade(&channel);
+    channel.on_message(Box::new(move |msg| {
+        let step = {
+            let mut r = rx.lock().unwrap();
+            if msg.is_string {
+                r.on_text(&String::from_utf8_lossy(&msg.data))
+            } else {
+                r.on_binary(&msg.data)
+            }
+        };
+        if let Some(done) = step.done {
+            (sink.done)(done);
+        }
+        let reply_to = reply_to.clone();
+        Box::pin(async move {
+            if let (Some(text), Some(ch)) = (step.reply, reply_to.upgrade()) {
+                let _ = ch.send_text(text).await;
+            }
+        })
+    }));
 }
 
 /// Opus 解码器：浏览器发的是 48kHz，直接解到 16kHz 单声道——
@@ -218,50 +216,5 @@ impl Decoder {
 impl Drop for Decoder {
     fn drop(&mut self) {
         unsafe { opus_sys::opus_decoder_destroy(self.dec) }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn inbox_yields_whole_frames_and_pads_the_tail() {
-        let inbox = Inbox::default();
-        inbox.set_live();
-        inbox.push(&[7i16; 700]);
-        let frames = inbox.take(false);
-        assert_eq!(frames.len(), 2);
-        assert_eq!(frames[0].len(), FRAME);
-        // 700 - 640 = 60 个样本留在原地，收尾时补零成一帧
-        let tail = inbox.take(true);
-        assert_eq!(tail.len(), 1);
-        assert_eq!(&tail[0][..60], &[7i16; 60]);
-        assert!(tail[0][60..].iter().all(|&s| s == 0));
-        assert!(inbox.take(true).is_empty());
-    }
-
-    /// 没在说话时只留最近半秒：既不吃掉第一个字，也不把上一句的尾巴带进来
-    #[test]
-    fn idle_inbox_keeps_only_preroll() {
-        let inbox = Inbox::default();
-        inbox.push(&[1i16; PREROLL]);
-        inbox.push(&[2i16; 100]);
-        let s = inbox.state.lock().unwrap();
-        assert_eq!(s.pcm.len(), PREROLL);
-        assert_eq!(*s.pcm.last().unwrap(), 2);
-        assert_eq!(s.pcm[PREROLL - 101], 1);
-    }
-
-    /// 收尾之后回到预录模式：下一句之前的空闲音频不会无限堆积
-    #[test]
-    fn ending_returns_to_preroll() {
-        let inbox = Inbox::default();
-        inbox.set_live();
-        inbox.push(&[1i16; PREROLL * 2]);
-        assert_eq!(inbox.take(false).len(), PREROLL * 2 / FRAME);
-        inbox.take(true);
-        inbox.push(&[2i16; PREROLL * 2]);
-        assert_eq!(inbox.state.lock().unwrap().pcm.len(), PREROLL);
     }
 }

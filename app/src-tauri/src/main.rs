@@ -2,7 +2,9 @@
 #![windows_subsystem = "windows"]
 
 mod controller;
+mod inbox;
 mod ipc;
+mod local;
 mod log;
 mod remote;
 mod session;
@@ -16,6 +18,7 @@ use std::sync::Arc;
 use tauri::{Manager, RunEvent, WindowEvent};
 use tokio::sync::mpsc;
 use voicekey_core::QwenEngine;
+use voicekey_remote::Floor;
 
 fn main() {
     log::init();
@@ -30,18 +33,40 @@ fn main() {
             ipc::disconnect_phone,
             ipc::retry_remote,
             ipc::open_settings,
-            ipc::probe_channel
+            ipc::probe_channel,
+            ipc::list_mics,
+            ipc::mic_test,
+            ipc::mic_retry,
+            ipc::open_mic_privacy,
+            ipc::hud_choose,
+            ipc::inbox_items,
+            ipc::inbox_copy,
+            ipc::inbox_reveal,
+            ipc::inbox_dismiss,
+            ipc::inbox_resize
         ])
         .setup(move |app| {
             let (tx, rx) = mpsc::unbounded_channel();
             let qwen = Arc::new(QwenEngine::default());
+            // 发言权建一次：手机接入整套重启时它不动，电脑本机麦克风也挂在它上面
+            let (floor, events) = Floor::new();
             state::manage(app.handle(), settings.clone(), tx, qwen.clone());
 
             let handle = app.handle().clone();
             controller::spawn(handle.clone(), qwen, rx);
-            remote::spawn(handle.clone());
+            // 两个声源的事件汇进同一条通道交给会话。这条通道不经过手机接入：
+            // 隧道没起来、起不来、重启中，电脑本机麦克风照样能用
+            let to_session = handle.state::<state::AppState>().tx.clone();
+            let mut events = events;
+            tauri::async_runtime::spawn(async move {
+                while let Some(e) = events.recv().await {
+                    let _ = to_session.send(session::types::Msg::Remote(e));
+                }
+            });
             ui::create_overlays(&handle)?;
             ui::build_tray(&handle)?;
+            local::spawn(handle.clone(), floor.clone(), settings.local.clone());
+            remote::spawn(handle.clone(), floor);
             // 开机自启动以磁盘上的设置为准对齐一次
             if let Err(e) = state::apply(&handle, &settings) {
                 log_warn!("{e}");

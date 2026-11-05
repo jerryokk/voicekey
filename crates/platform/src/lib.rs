@@ -1,11 +1,18 @@
-//! 平台层：把文字打进当前前台窗口，把手机触摸板变成鼠标。
+//! 平台层：把文字打进前台窗口、手机触摸板变鼠标、本机麦克风采集与按住说话的快捷键，
+//! 以及资源管理器、剪贴板、不抢焦点的窗口显示。
 //!
-//! 只支持 Windows：键鼠注入、UIPI 判定、显示器换算都是 Win32 的事。
+//! 只支持 Windows：键鼠注入、UIPI 判定、显示器换算、WASAPI 都是 Win32 的事。
 
+pub mod hotkey;
+pub mod mic;
 mod mouse;
+mod shell;
 mod win;
 
 pub use mouse::{Button, Pointer};
+pub use shell::{
+    foreground, hide_window, reveal, set_clipboard, set_foreground, show_no_activate, window_visible,
+};
 pub use win::{backspace, input_blocked, paste, Pasted};
 
 /// 边说边上屏：与已打出的文本比对，退格删掉分歧部分再补打新内容（不经剪贴板）
@@ -28,8 +35,7 @@ impl Typer {
         r
     }
 
-    /// 放弃这一句：把已经打出去的字退回来。
-    /// 用户上滑取消时，输入框里不该留下半句。
+    /// 放弃这一句：把已经打出去的字退回来，输入框里不留半句
     pub fn discard(self) -> Result<(), String> {
         win::backspace(self.typed.len())
     }

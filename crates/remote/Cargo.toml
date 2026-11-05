@@ -15,5 +15,10 @@ webrtc = "0.17.2"
 opus-sys = { path = "../opus-sys" }
 # 二维码 token：拿到它就能操作这台电脑的键鼠，必须来自系统 CSPRNG
 getrandom = "=0.3.4"
-# 作业对象：进程无论怎么退都要带走 cloudflared。与 platform 用同一个版本
-windows = { version = "0.62", features = ["Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# 作业对象：进程无论怎么退都要带走 cloudflared；磁盘剩余空间：收文件前先看够不够。与 platform 用同一个版本
+windows = { version = "0.62", features = [
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }

@@ -1,4 +1,4 @@
-//! 手机端接入：本地服务、隧道、信令、WebRTC 收流与触摸板。
+//! 手机端接入：本地服务、隧道、信令、WebRTC 收流、触摸板与发到电脑。
 //!
 //! 只做「把手机的音频变成一条 16k 帧流、把触摸与按键变成事件交给上层」，
 //! 不认识识别引擎，也不认识 Tauri。
@@ -9,14 +9,18 @@
 //! 浏览器 --SRTP/SCTP 直连--------------------------> Receiver --┘
 //! ```
 //!
-//! 权限只有一条规则：有人正在说话时，只有说话的那台设备能动鼠标、退格；
-//! 候选只能由最后说话的那台设备来选。
+//! 权限只有一条规则：有人正在说话时，只有说话的那个声源能动鼠标、退格；
+//! 候选只能由最后说话的那个声源来选。规则本身在 [`Floor`]，电脑本机麦克风也受它管。
 
+mod floor;
 pub mod protocol;
 mod rtc;
 mod tunnel;
+mod xfer;
 
+pub use floor::{Floor, LOCAL};
 pub use protocol::{Button, Pad};
+pub use xfer::{Item as XferItem, Received};
 
 use axum::{
     extract::{
@@ -30,34 +34,35 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use protocol::{Op, Out};
-use rtc::{Inbox, Receiver};
+use rtc::Receiver;
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex};
 use tunnel::Tunnel;
+use voicekey_core::audio::{pump, Inbox};
 use voicekey_core::Audio;
 
 const PAGE: &str = include_str!("page.html");
 /// 手机页扫码重连用的二维码解码库（jsQR 1.4.0，Apache-2.0），连上电脑时就取回来装进 Worker，扫码时不再依赖网络
 const JSQR: &str = include_str!("jsqr.min.js");
 
-/// 一条 WS 连接（一台设备）的编号，从 1 开始；0 留给「没有人」
+/// 声源编号：手机的每条 WS 连接从 1 开始递增，电脑本机是 [`LOCAL`]；0 留给「没有人」
 pub type Conn = u64;
 
-/// 手机端事件
+/// 声源事件。开始与结束一句的事件都带着声源编号：会话只认当前说话方的结束事件，
+/// 上一代服务里迟到的收尾不会误伤新的一句
 #[derive(Debug)]
 pub enum Event {
-    /// 某台设备按下，本句开始，附带本句的音频帧流
-    Press(Audio),
+    /// 某个声源按下，本句开始，附带本句的音频帧流
+    Press(Conn, Audio),
     /// 松手，进入定稿
-    Release,
+    Release(Conn),
     /// 上滑取消：这一句不要了，丢弃音频且不产出文字
-    Cancel,
+    Cancel(Conn),
     /// 说到一半断线：保留已识别的文字
-    Abort(String),
+    Abort(Conn, String),
     /// 用户在候选里选了一条，参数是渠道 id
     Commit(String),
     /// 退格一个字
@@ -66,16 +71,21 @@ pub enum Event {
     Pad(Conn, Pad),
     /// 某台设备的触摸板通道没了（断线或换了一条直连）：它按住没放的鼠标键要替它放开
     Gone(Conn),
+    /// 手机发到电脑的一项（剪贴板、文字、文件）已经收好
+    Received(Conn, Received),
 }
 
 pub struct Config {
     pub port: u16,
     pub cloudflared: std::path::PathBuf,
+    /// 发言权与事件通道，跨服务重启复用
+    pub floor: Arc<Floor>,
+    /// 手机发来的文件存到这里（Windows 的「下载」文件夹）
+    pub downloads: std::path::PathBuf,
 }
 
 pub struct Service {
     hub: Arc<Hub>,
-    events: mpsc::UnboundedReceiver<Event>,
     /// 承载 HTTP/WS 的服务任务。它握着 listener，不显式 abort 的话
     /// 端口会一直被占着，重新拉起服务时绑不上。
     server: tokio::task::JoinHandle<()>,
@@ -87,6 +97,7 @@ impl Drop for Service {
         self.server.abort();
         // 服务没了，已连上的页面也得断，不然它们会对着一个空 Hub 说话
         self.hub.kick();
+        self.hub.floor.drop_phones();
     }
 }
 
@@ -98,18 +109,16 @@ impl Service {
             .map_err(|e| format!("端口 {} 绑定失败：{e}", config.port))?;
         let tunnel = tunnel::start(&config.cloudflared, &format!("http://127.0.0.1:{}", config.port)).await?;
 
-        let (events_tx, events) = mpsc::unbounded_channel();
         let hub = Arc::new(Hub {
             token: std::sync::RwLock::new(new_token()?),
             origin: tunnel.origin().to_string(),
-            events: events_tx,
+            floor: config.floor,
+            downloads: config.downloads,
             out: broadcast::channel(64).0,
             log: broadcast::channel(64).0,
             epoch: watch::channel(0).0,
             devices: watch::channel(0).0,
             hold: AsyncMutex::new(None),
-            holding: AtomicU64::new(0),
-            owner: AtomicU64::new(0),
         });
 
         let router = Router::new().route("/", get(page)).route("/jsqr.js", get(jsqr)).route("/ws", get(ws)).with_state(hub.clone());
@@ -117,7 +126,7 @@ impl Service {
             let _ = axum::serve(listener, router).await;
         });
 
-        Ok(Self { hub, events, server, tunnel })
+        Ok(Self { hub, server, tunnel })
     }
 
     /// 公网域名，用于诊断展示（不带 token）
@@ -132,13 +141,9 @@ impl Service {
         let _ = (&mut self.server).await;
     }
 
-    /// 下一个手机端事件。Err 表示服务已经不可用（隧道进程退出了），附带原因
-    pub async fn next_event(&mut self) -> Result<Event, String> {
-        tokio::select! {
-            // 发送端在 Hub 里，Hub 活多久它就活多久，这里不会收到 None
-            Some(e) = self.events.recv() => Ok(e),
-            reason = self.tunnel.exited() => Err(reason),
-        }
+    /// 等到服务不可用（隧道进程退出了），返回原因。手机端事件不从这里出，走 [`Floor`] 的通道
+    pub async fn exited(&mut self) -> String {
+        self.tunnel.exited().await
     }
 
     /// 在线设备数，变化时通知
@@ -186,18 +191,17 @@ struct Hub {
     /// 可变：断开手机时轮换。先换 token 再推 epoch，[`ws`] 依赖这个顺序
     token: std::sync::RwLock<String>,
     origin: String,
-    events: mpsc::UnboundedSender<Event>,
+    floor: Arc<Floor>,
+    downloads: std::path::PathBuf,
     out: broadcast::Sender<String>,
     /// 运行时错误，见 [`Service::logs`]
     log: broadcast::Sender<String>,
     /// 每次踢人加一，所有连接都盯着它
     epoch: watch::Sender<u64>,
     devices: watch::Sender<usize>,
+    /// 本服务里正在说话的那台手机的音频泵。发言权本身在 [`Floor`]，
+    /// 这把锁只负责让开始与结束一句串行：结束事件发出前，别的手机进不来
     hold: AsyncMutex<Option<Hold>>,
-    /// 正在说话的连接，0 表示没人。触摸板回调是同步的，拿不了异步锁，所以单独放一份
-    holding: AtomicU64,
-    /// 最后说话的连接：松手后候选还在，只有它能选
-    owner: AtomicU64,
 }
 
 struct Hold {
@@ -211,26 +215,14 @@ impl Hub {
         self.epoch.send_modify(|e| *e += 1);
     }
 
-    /// 没人在说，或者调用者就是说话的人
-    fn may_act(&self, conn: Conn) -> bool {
-        let holding = self.holding.load(Ordering::Relaxed);
-        holding == 0 || holding == conn
-    }
-
-    /// 候选归最后说话的设备；它走了就谁都能选
-    fn may_commit(&self, conn: Conn) -> bool {
-        let owner = self.owner.load(Ordering::Relaxed);
-        owner == 0 || owner == conn
-    }
-
     fn emit(&self, e: Event) {
-        let _ = self.events.send(e);
+        self.floor.emit(e);
     }
 
-    /// 开始一句话。已经有设备在说就返回 false，由调用方回 busy。
+    /// 开始一句话。发言权已被别人拿着（另一台手机或电脑本机）就返回 false，由调用方回 busy。
     async fn begin(&self, conn: Conn, inbox: Arc<Inbox>) -> bool {
         let mut hold = self.hold.lock().await;
-        if hold.is_some() {
+        if !self.floor.take(conn) {
             return false;
         }
         let (tx, rx) = mpsc::unbounded_channel::<Vec<i16>>();
@@ -238,39 +230,21 @@ impl Hub {
         inbox.set_live();
         let pump = tokio::spawn(pump(inbox, tx, stop.clone()));
         *hold = Some(Hold { conn, stop, pump });
-        self.holding.store(conn, Ordering::Relaxed);
-        self.owner.store(conn, Ordering::Relaxed);
-        self.emit(Event::Press(rx));
+        self.emit(Event::Press(conn, rx));
         true
     }
 
-    /// 持有者结束这一句：停泵、交还 hold，再发出 `then`。调用者不是持有者就什么都不做。
+    /// 持有者结束这一句：停泵、发出 `then`，再交还发言权。调用者不是持有者就什么都不做。
     ///
-    /// `then` 必须在锁内发出：锁一放，别的设备就能 `begin`，
-    /// 它的 Press 不能抢在这一句的 Release 前面进会话。
+    /// 顺序不能换：发言权一交还，别的声源就能开始，它的 Press 不能抢在这一句的 Release 前面进会话。
     async fn end(&self, conn: Conn, then: Event) {
         let mut hold = self.hold.lock().await;
         let Some(current) = hold.take_if(|h| h.conn == conn) else { return };
-        self.holding.store(0, Ordering::Relaxed);
         current.stop.store(true, Ordering::Relaxed);
         // 泵退出时丢弃发送端，引擎随即收到流结束——这一定在 Release 之前
         let _ = current.pump.await;
         self.emit(then);
-    }
-}
-
-/// 把 Inbox 里的样本按 20ms 切帧送出去。10ms 轮询一次：跟得上实时，又不会空转。
-async fn pump(inbox: Arc<Inbox>, tx: mpsc::UnboundedSender<Vec<i16>>, stop: Arc<AtomicBool>) {
-    let mut tick = tokio::time::interval(Duration::from_millis(10));
-    loop {
-        tick.tick().await;
-        let end = stop.load(Ordering::Relaxed);
-        for frame in inbox.take(end) {
-            let _ = tx.send(frame);
-        }
-        if end {
-            return;
-        }
+        self.floor.give_back(conn);
     }
 }
 
@@ -381,11 +355,16 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>, mut epoch: watch::Receiver<u64
                 let gate = hub.clone();
                 // 松键不设门槛：按下时有资格、松开时别人开始说话了，也得让它把键放开
                 let pad: rtc::PadSink = Arc::new(move |p| {
-                    if gate.may_act(conn) || matches!(p, Pad::Up { .. }) {
+                    if gate.floor.may_act(conn) || matches!(p, Pad::Up { .. }) {
                         gate.emit(Event::Pad(conn, p));
                     }
                 });
-                let r = match Receiver::new(inbox.clone(), pad, hub.log.clone(), out_tx.downgrade()).await {
+                let to = hub.clone();
+                let xfer = rtc::XferSink {
+                    dir: hub.downloads.clone(),
+                    done: Arc::new(move |r| to.emit(Event::Received(conn, r))),
+                };
+                let r = match Receiver::new(inbox.clone(), pad, xfer, hub.log.clone(), out_tx.downgrade()).await {
                     Ok(r) => r,
                     Err(e) => {
                         say(protocol::error("rtc", e));
@@ -410,15 +389,15 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>, mut epoch: watch::Receiver<u64
                     say(Out::Busy.json());
                 }
             }
-            Op::Stop => hub.end(conn, Event::Release).await,
-            Op::Cancel => hub.end(conn, Event::Cancel).await,
+            Op::Stop => hub.end(conn, Event::Release(conn)).await,
+            Op::Cancel => hub.end(conn, Event::Cancel(conn)).await,
             Op::Commit { channel } => {
-                if hub.may_commit(conn) {
+                if hub.floor.may_commit(conn) {
                     hub.emit(Event::Commit(channel));
                 }
             }
             Op::Backspace => {
-                if hub.may_act(conn) {
+                if hub.floor.may_act(conn) {
                     hub.emit(Event::Erase);
                 }
             }
@@ -426,8 +405,8 @@ async fn handle(socket: WebSocket, hub: Arc<Hub>, mut epoch: watch::Receiver<u64
     }
 
     // 说到一半断线：保留已识别的文字。已经松手的不打断，定稿照常上屏
-    hub.end(conn, Event::Abort("连接断开".into())).await;
-    let _ = hub.owner.compare_exchange(conn, 0, Ordering::Relaxed, Ordering::Relaxed);
+    hub.end(conn, Event::Abort(conn, "连接断开".into())).await;
+    hub.floor.leave(conn);
     if let Some(r) = receiver {
         r.close().await;
     }

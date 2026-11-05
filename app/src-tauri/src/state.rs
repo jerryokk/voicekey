@@ -38,10 +38,29 @@ impl RemoteStatus {
     pub const STARTING: Self = Self { phase: Phase::Starting, error: None, devices: 0 };
 }
 
+/// 电脑本机麦克风的状态，喂给设置页
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalStatus {
+    /// off：没开；ready：快捷键已装上（启动时不试开麦克风）；error：开了但用不了
+    pub state: &'static str,
+    pub error: Option<String>,
+    /// 出错原因是 Windows 隐私设置：界面给「打开系统设置」
+    pub privacy: bool,
+    /// 能用，但有件事要让用户知道（比如选的麦克风不在了，改用了系统默认）
+    pub note: Option<String>,
+}
+
+impl LocalStatus {
+    pub const OFF: Self = Self { state: "off", error: None, privacy: false, note: None };
+    pub const READY: Self = Self { state: "ready", error: None, privacy: false, note: None };
+}
+
 pub struct AppState {
     pub settings: Arc<RwLock<Settings>>,
     pub tx: UnboundedSender<Msg>,
     pub qwen: Arc<QwenEngine>,
+    pub local_status: Arc<RwLock<LocalStatus>>,
     /// 最近一次成功上屏的结果（连接页展示）
     pub last: Arc<RwLock<Option<serde_json::Value>>>,
     /// 手机接入服务起来之后才有值；扫码地址也从它拿（token 轮换后随之变化）
@@ -50,11 +69,17 @@ pub struct AppState {
 }
 
 /// 把这些状态装进 Tauri 的全局表
-pub fn manage<R: Runtime>(app: &AppHandle<R>, settings: Settings, tx: UnboundedSender<Msg>, qwen: Arc<QwenEngine>) {
+pub fn manage<R: Runtime>(
+    app: &AppHandle<R>,
+    settings: Settings,
+    tx: UnboundedSender<Msg>,
+    qwen: Arc<QwenEngine>,
+) {
     app.manage(AppState {
         settings: Arc::new(RwLock::new(settings)),
         tx,
         qwen,
+        local_status: Arc::new(RwLock::new(LocalStatus::OFF)),
         last: Arc::new(RwLock::new(None)),
         remote: Arc::new(RwLock::new(None)),
         remote_status: Arc::new(RwLock::new(RemoteStatus::STARTING)),
@@ -89,7 +114,11 @@ pub fn update_settings<R: Runtime>(app: &AppHandle<R>, f: impl FnOnce(&mut Setti
     if s.channel != before.channel {
         download_model(app, s.channel);
     }
+    if s.local != before.local {
+        crate::local::configure(&s.local);
+    }
     let _ = app.emit("settings", &s);
+    crate::ui::tray_refresh(app);
     applied.and(saved)
 }
 

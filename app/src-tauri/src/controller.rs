@@ -1,6 +1,6 @@
-//! 会话编排：手机按下 → 音频流 → 识别 → 上屏，以及手机触摸板落到鼠标。
+//! 会话编排：声源（手机或本机）按下 → 音频流 → 识别 → 上屏，以及手机触摸板落到鼠标。
 //!
-//! 一句话由手机端的 Press 开始、Release 结束，音频由 `voicekey-remote` 交过来。
+//! 一句话由声源的 Press 开始、Release 结束，事件经 `Floor` 由 main.rs 转发进来。
 //! 判断（候选排序、焦点、迟到结果作废）在 `session::machine`，这里只管调用谁。
 
 use crate::session::engines::Engines;
@@ -16,7 +16,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use voicekey_core::{Audio, QwenEngine};
 use voicekey_platform::{self as pf, Pointer, Typer};
 use voicekey_remote::protocol;
-use voicekey_remote::{Button, Conn, Event as RemoteEvent, Handle as RemoteHandle, Pad};
+use voicekey_remote::{Button, Conn, Event as RemoteEvent, Handle as RemoteHandle, Pad, LOCAL};
 
 pub struct Ctl {
     app: AppHandle,
@@ -28,8 +28,10 @@ pub struct Ctl {
     /// 代际与超时票根：迟到的结果靠它作废
     tickets: Tickets,
     mode: Mode,
-    /// 手机正按着
+    /// 正按着（手机或电脑本机）
     recording: bool,
+    /// 最近一次按下的声源，0 表示还没人说过
+    speaker: Conn,
     typer: Option<Typer>,
     /// 单渠道会话的分段文本
     segs: Segments,
@@ -52,6 +54,7 @@ pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) 
         tickets: Tickets::default(),
         mode: Mode::Idle,
         recording: false,
+        speaker: 0,
         typer: None,
         segs: Segments::default(),
         picker: Picker::default(),
@@ -77,14 +80,14 @@ impl Ctl {
             Ok(pf::Pasted::Sent) => ui::hud_hide(&self.app, 0),
             Ok(pf::Pasted::Blocked) => {
                 let msg = "目标窗口以管理员权限运行，文字已复制到剪贴板，请按 Ctrl+V";
-                self.publish(protocol::notice(msg));
+                self.tell(protocol::notice(msg));
                 ui::hud(&self.app, "info", "已复制到剪贴板 · 请手动粘贴", ch);
                 ui::hud_hide(&self.app, 2400);
                 return true;
             }
             Err(e) => {
                 crate::log_error!("上屏失败：{e}");
-                self.publish(protocol::error("session", format!("上屏失败：{e}")));
+                self.tell(protocol::error("session", format!("上屏失败：{e}")));
                 ui::hud_error(&self.app, &format!("上屏失败：{e}"));
             }
         }
@@ -114,6 +117,13 @@ impl Ctl {
         }
     }
 
+    /// 这一句的进度只告诉说话的那一方：电脑本机说话时手机上不该冒出别人的字，结果都在浮层上
+    fn tell(&self, value: serde_json::Value) {
+        if self.speaker != LOCAL {
+            self.publish(value);
+        }
+    }
+
     fn handle(&mut self, m: Msg) {
         match m {
             Msg::Remote(e) => self.remote_event(e),
@@ -130,8 +140,18 @@ impl Ctl {
                 }
             }
             Msg::Reset(reason) => {
-                self.abort(reason);
+                // 只有手机说的那一句跟着手机接入一起断；电脑本机说的与隧道无关
+                if self.speaker != LOCAL {
+                    self.abort(reason);
+                }
                 log(self.pointer.release_all());
+            }
+            // 浮层候选：点了某一行
+            Msg::Choose(i) if self.mode == Mode::Pick && !self.recording => self.choose(i),
+            // 浮层候选出现时按了 Esc：这组候选不要了。按 Esc 时用户可能已经点过浮层（焦点在浮层上），还回去
+            Msg::Dismiss if self.mode == Mode::Pick && !self.recording => {
+                ui::hud_return_focus(&self.app);
+                self.cancel_current()
             }
             _ => {}
         }
@@ -139,16 +159,20 @@ impl Ctl {
 
     fn remote_event(&mut self, e: RemoteEvent) {
         match e {
-            RemoteEvent::Press(audio) => self.press(audio),
-            RemoteEvent::Release => self.release(),
-            RemoteEvent::Cancel => self.cancel_current(),
-            RemoteEvent::Abort(reason) => self.abort(reason),
+            RemoteEvent::Press(who, audio) => self.press(who, audio),
+            // 结束一句的事件只认当前说话方：上一代服务里断开的连接，收尾可能晚到
+            RemoteEvent::Release(who) if who == self.speaker => self.release(),
+            RemoteEvent::Cancel(who) if who == self.speaker => self.cancel_current(),
+            RemoteEvent::Abort(who, reason) if who == self.speaker => self.abort(reason),
+            RemoteEvent::Release(_) | RemoteEvent::Cancel(_) | RemoteEvent::Abort(..) => {}
             RemoteEvent::Commit(channel) => self.commit(&channel),
             // 流式上屏途中不给删：打字机记着已打的字，外部退格会让它失准
             RemoteEvent::Erase if self.typer.is_none() => log(pf::backspace(1)),
             RemoteEvent::Erase => {}
             RemoteEvent::Pad(conn, p) => self.pad(conn, p),
             RemoteEvent::Gone(conn) => log(self.pointer.release(conn)),
+            // 发到电脑与说话无关，不看发言权：谁发的都收
+            RemoteEvent::Received(conn, r) => crate::inbox::receive(&self.app, conn, r),
         }
     }
 
@@ -172,7 +196,12 @@ impl Ctl {
         log(r);
     }
 
-    fn press(&mut self, audio: Audio) {
+    fn press(&mut self, who: Conn, audio: Audio) {
+        // 发言权保证此刻没有别人在录；「接着说」时说话方可以换成另一个声源
+        if self.recording {
+            return;
+        }
+        self.speaker = who;
         match self.mode {
             Mode::Idle => {
                 let s = self.settings.read().unwrap().clone();
@@ -199,7 +228,7 @@ impl Ctl {
         let blocked = pf::input_blocked();
         self.typer = (s.streaming && !blocked).then(Typer::default);
         if blocked {
-            self.publish(protocol::notice("当前窗口以管理员权限运行，将改用剪贴板粘贴"));
+            self.tell(protocol::notice("当前窗口以管理员权限运行，将改用剪贴板粘贴"));
         }
         self.segs = Segments::default();
         let seg = self.segs.start();
@@ -256,7 +285,7 @@ impl Ctl {
                     log(t.update(&text));
                 }
                 // 人盯着手机看，实时文字必须发到手机上去
-                self.publish(protocol::partial(text));
+                self.tell(protocol::partial(text));
                 self.hud_single(ch);
             }
             Mode::Pick => {
@@ -296,15 +325,15 @@ impl Ctl {
                     } else {
                         format!("识别失败：{e}，{}", Self::kept(blocked))
                     };
-                    self.publish(protocol::error("asr", msg.as_str()));
+                    self.tell(protocol::error("asr", msg.as_str()));
                     ui::hud_error(&self.app, &msg);
                 } else if text.is_empty() {
                     // 桌面上只有一行"没有识别到内容"，手机上什么原因都看不到，
                     // 所以给一句能立刻照做的话
-                    self.publish(protocol::notice("没听清：靠近手机再说一次，或在电脑上换个渠道试试"));
+                    self.tell(protocol::notice("没听清：靠近手机再说一次，或在电脑上换个渠道试试"));
                     ui::hud(&self.app, "info", "没有识别到内容", ch);
                     ui::hud_hide(&self.app, 1000);
-                    self.publish(protocol::fin(""));
+                    self.tell(protocol::fin(""));
                 } else {
                     if streamed {
                         ui::hud_hide(&self.app, 0);
@@ -312,7 +341,7 @@ impl Ctl {
                         self.output(&text, ch);
                     }
                     self.record(&text, ch);
-                    self.publish(protocol::fin(text));
+                    self.tell(protocol::fin(text));
                 }
             }
             Mode::Pick => {
@@ -327,7 +356,7 @@ impl Ctl {
         }
     }
 
-    /// 手机松手。音频流这时已经结束（服务端在发 Release 前就停了泵），
+    /// 松手。音频流这时已经结束（声源在发 Release 前就停了泵），
     /// 所以这里只更新界面状态并开始等定稿。
     fn release(&mut self) {
         if !self.recording {
@@ -365,7 +394,7 @@ impl Ctl {
         // 非流式时中间结果还没写进输入框，补上；流式已经打出去了，不重复写
         let blocked = !streamed && !partial.is_empty() && self.output(&partial, ch);
         let text = if partial.is_empty() { message } else { format!("{message}，{}", Self::kept(blocked)) };
-        self.publish(protocol::error("session", text.as_str()));
+        self.tell(protocol::error("session", text.as_str()));
         ui::hud_error(&self.app, &text);
     }
 
@@ -381,12 +410,14 @@ impl Ctl {
         }
         if self.mode == Mode::Pick {
             self.picker.clear();
+            // 不论谁在说都告诉手机：「接着说」时说话方可能换过，手机上残留的旧候选得收掉
             self.publish(protocol::rows(serde_json::json!(Model { rows: &[], sel: 0 })));
+            ui::hud_rows_closed(&self.app);
         }
         self.mode = Mode::Idle;
     }
 
-    /// 手机上滑取消：这一句不要了，什么都不上屏
+    /// 取消（手机上滑、本机按 Esc）：这一句不要了，什么都不上屏
     fn cancel_current(&mut self) {
         if self.mode == Mode::Idle {
             return;
@@ -411,10 +442,17 @@ impl Ctl {
             Choice::Select => self.emit_rows(),
             Choice::Shake => {
                 self.emit_rows();
-                self.publish(protocol::shake(i));
+                self.tell(protocol::shake(i));
+                if self.speaker == LOCAL {
+                    ui::hud_shake(&self.app, i);
+                }
             }
             Choice::Commit => {
                 let Some((text, ch)) = self.picker.take(i) else { return };
+                // 在浮层上点的：此刻前台是浮层，先把焦点还给原来的输入框，字才打得进去
+                if self.speaker == LOCAL {
+                    ui::hud_return_focus(&self.app);
+                }
                 log(update_settings(&self.app, |s| {
                     s.last_pick = Some(ch);
                     *s.pick_counts.entry(ch).or_default() += 1;
@@ -422,7 +460,7 @@ impl Ctl {
                 self.cancel(false);
                 self.output(&text, ch);
                 self.record(&text, ch);
-                self.publish(protocol::fin(text));
+                self.tell(protocol::fin(text));
             }
         }
     }
@@ -442,8 +480,13 @@ impl Ctl {
             return;
         }
         self.last_emit = Instant::now();
-        let model = Model { rows: self.picker.rows(), sel: self.picker.sel() };
-        self.publish(protocol::rows(serde_json::json!(model)));
+        let model = serde_json::json!(Model { rows: self.picker.rows(), sel: self.picker.sel() });
+        if self.speaker == LOCAL {
+            // 本机说话没有手机可看，候选在浮层上挑；松手前浮层只展示，松手后才能点
+            ui::hud_rows(&self.app, model, !self.recording);
+        } else {
+            self.tell(protocol::rows(model));
+        }
     }
 }
 

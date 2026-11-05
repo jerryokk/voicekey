@@ -1,4 +1,8 @@
-import { invoke, on, applyTheme, type AppInfo, type Settings, type SettingsPatch, type OfflineStatus, type Channel, type Remote, type Last } from "./api";
+import {
+  invoke, on, applyTheme,
+  type AppInfo, type Settings, type SettingsPatch, type OfflineStatus, type Channel, type Remote, type Last,
+  type LocalStatus, type InboxCard,
+} from "./api";
 
 export const app = $state({
   info: null as AppInfo | null,
@@ -6,13 +10,15 @@ export const app = $state({
   models: {} as Partial<Record<Channel, OfflineStatus>>,
   remote: { url: null, qr: null, phase: "starting", error: null, devices: 0 } as Remote,
   last: null as Last | null,
+  local: { state: "off", error: null, privacy: false, note: null } as LocalStatus,
+  inbox: [] as InboxCard[],
   /** 最近一次命令失败的原因，几秒后自动消失 */
   error: null as string | null,
 });
 
 let errorTimer: ReturnType<typeof setTimeout> | undefined;
 
-function fail(e: unknown) {
+export function fail(e: unknown) {
   app.error = String(e);
   clearTimeout(errorTimer);
   errorTimer = setTimeout(() => (app.error = null), 5000);
@@ -57,6 +63,8 @@ export async function init() {
     }),
     on<{ ch: Channel; status: OfflineStatus }>("model", (v) => (app.models[v.ch] = v.status)),
     on<Last>("last", (v) => (app.last = v)),
+    on<LocalStatus>("local", (v) => (app.local = v)),
+    on<InboxCard[]>("inbox", (v) => (app.inbox = v)),
   ]);
   const info = await invoke<AppInfo>("get_state");
   app.info = info;
@@ -64,6 +72,8 @@ export async function init() {
   app.models = info.models;
   app.remote = info.remote;
   app.last = info.last;
+  app.local = info.local;
+  app.inbox = info.inbox;
   applyTheme(info.settings.theme);
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => app.s && applyTheme(app.s.theme));
 }

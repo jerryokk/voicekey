@@ -1,8 +1,9 @@
 //! 手机页与电脑之间的唯一契约。
 //!
-//! 两条通道各一份：
+//! 三条通道：
 //! - WS（经隧道）：信令与会话控制，[`Op`] 上行、[`Out`] 下行
 //! - DataChannel `input`（WebRTC 直连）：触摸板，[`Pad`] 上行
+//! - DataChannel `xfer`（WebRTC 直连）：发到电脑，[`XferUp`] 上行、[`XferDown`] 下行
 //!
 //! 手机页是单文件内联脚本，刻意不引入构建工具，契约没法靠类型系统跨语言传递。
 //! 这里集中定义枚举（改字段名会编译报错），再用 `page_agrees_with_protocol`
@@ -62,8 +63,67 @@ impl Out {
     }
 }
 
-/// 触摸板 DataChannel 的 label。别的 label 一律关掉
+/// 触摸板 DataChannel 的 label。只认它和 [`XFER_CHANNEL`]，别的 label 一律关掉
 pub const PAD_CHANNEL: &str = "input";
+
+/// 「发到电脑」的 DataChannel：有序可靠，和触摸板分开——传大文件不能堵住光标
+pub const XFER_CHANNEL: &str = "xfer";
+
+/// 文件按这么大一块发：浏览器之间互通的消息上限是 16KB
+pub const XFER_CHUNK: usize = 16 * 1024;
+
+/// 发到电脑的是什么
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum XferKind {
+    /// 写进电脑剪贴板
+    Clip,
+    /// 在电脑上显示，用户自己复制
+    Text,
+    /// 存进下载文件夹（图片也是文件，只是多带一张缩略图）
+    File,
+}
+
+/// 手机 → 电脑（DataChannel `xfer`）的文本帧。二进制帧是当前这一项的数据块，按顺序接在 `begin` 后面
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "k", rename_all = "lowercase", deny_unknown_fields)]
+pub enum XferUp {
+    /// 开始一项。`batch`/`of`：一次选了几个文件时归成一组，电脑上合成一张卡片
+    Begin {
+        id: u32,
+        kind: XferKind,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        mime: Option<String>,
+        size: u64,
+        batch: u32,
+        of: u32,
+        /// 图片的缩略图（data:image/jpeg;base64,…，手机端用 canvas 生成，最长边 256）
+        #[serde(default)]
+        thumb: Option<String>,
+    },
+    /// 这一项的数据发完了
+    End { id: u32 },
+    /// 用户在手机上取消了这一项
+    Abort { id: u32 },
+}
+
+/// 电脑 → 手机（DataChannel `xfer`）
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "k", rename_all = "lowercase")]
+pub enum XferDown {
+    /// 收好了
+    Ok { id: u32 },
+    /// 没收成，附原因
+    Fail { id: u32, message: String },
+}
+
+impl XferDown {
+    pub(crate) fn json(&self) -> String {
+        serde_json::to_string(self).expect("XferDown 总能序列化")
+    }
+}
 
 /// 鼠标按键
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -206,6 +266,66 @@ mod tests {
         all
     }
 
+    fn xfer_ups() -> Vec<(&'static str, XferUp)> {
+        let all = vec![
+            (
+                r#"{"k":"begin","id":1,"kind":"file","name":"a.jpg","mime":"image/jpeg","size":9,"batch":4,"of":2,"thumb":"data:"}"#,
+                XferUp::Begin {
+                    id: 1,
+                    kind: XferKind::File,
+                    name: Some("a.jpg".into()),
+                    mime: Some("image/jpeg".into()),
+                    size: 9,
+                    batch: 4,
+                    of: 2,
+                    thumb: Some("data:".into()),
+                },
+            ),
+            (
+                r#"{"k":"begin","id":2,"kind":"clip","size":3,"batch":5,"of":1}"#,
+                XferUp::Begin { id: 2, kind: XferKind::Clip, name: None, mime: None, size: 3, batch: 5, of: 1, thumb: None },
+            ),
+            (
+                r#"{"k":"begin","id":3,"kind":"text","size":3,"batch":6,"of":1}"#,
+                XferUp::Begin { id: 3, kind: XferKind::Text, name: None, mime: None, size: 3, batch: 6, of: 1, thumb: None },
+            ),
+            (r#"{"k":"end","id":1}"#, XferUp::End { id: 1 }),
+            (r#"{"k":"abort","id":1}"#, XferUp::Abort { id: 1 }),
+        ];
+        for (_, x) in &all {
+            match x {
+                XferUp::Begin { .. } | XferUp::End { .. } | XferUp::Abort { .. } => {}
+            }
+        }
+        all
+    }
+
+    fn xfer_downs() -> Vec<XferDown> {
+        let all = vec![XferDown::Ok { id: 1 }, XferDown::Fail { id: 1, message: String::new() }];
+        for x in &all {
+            match x {
+                XferDown::Ok { .. } | XferDown::Fail { .. } => {}
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn parses_xfer_and_rejects_garbage() {
+        for (text, expect) in xfer_ups() {
+            assert_eq!(serde_json::from_str::<XferUp>(text).unwrap(), expect, "text: {text}");
+        }
+        for text in [
+            r#"{"k":"begin","id":1,"kind":"exe","size":1,"batch":1,"of":1}"#,
+            r#"{"k":"begin","id":1,"kind":"file","size":1}"#,
+            r#"{"k":"end"}"#,
+            r#"{"k":"end","id":1,"x":0}"#,
+        ] {
+            assert!(serde_json::from_str::<XferUp>(text).is_err(), "应当拒绝：{text}");
+        }
+        assert_eq!(XferDown::Fail { id: 3, message: "满".into() }.json(), r#"{"k":"fail","id":3,"message":"满"}"#);
+    }
+
     fn tag(json: &str, key: &str) -> String {
         serde_json::from_str::<Value>(json).unwrap()[key].as_str().unwrap().to_string()
     }
@@ -269,6 +389,16 @@ mod tests {
             }
         }
         names.push(PAD_CHANNEL.to_string());
+        names.push(XFER_CHANNEL.to_string());
+        for (t, _) in xfer_ups() {
+            names.push(tag(t, "k"));
+            if let Ok(v) = serde_json::from_str::<Value>(t) {
+                if let Some(k) = v["kind"].as_str() {
+                    names.push(k.to_string());
+                }
+            }
+        }
+        names.extend(xfer_downs().iter().map(|x| tag(&x.json(), "k")));
         for name in names {
             assert!(page.contains(&format!("'{name}'")), "page.html 里找不到：{name}");
         }

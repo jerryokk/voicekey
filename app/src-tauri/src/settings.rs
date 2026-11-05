@@ -1,8 +1,9 @@
-//! 用户设置：渠道、输出方式、触摸板速度、外观，存在数据目录的 settings.json。
+//! 用户设置：渠道、输出方式、触摸板速度、外观、本机麦克风，存在数据目录的 settings.json。
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use voicekey_core::util::data_file;
+use voicekey_platform::hotkey;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -15,7 +16,7 @@ pub enum Channel {
     Iflytek,
     Chatterfly,
     WetypeOffline,
-    /// 多渠道：勾选的渠道同时识别，手机上挑一条上屏
+    /// 多渠道：勾选的渠道同时识别，说完挑一条上屏（手机上，或本机说话时在浮层上）
     All,
 }
 
@@ -73,7 +74,48 @@ pub enum Theme {
     Dark,
 }
 
-/// 配置文件与 1.0.0 的结构一一对应：缺字段、多字段都按损坏处理，整份回到默认
+/// 电脑本机麦克风按住说话用的键：右 Alt 或右 Ctrl
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HotkeyKey {
+    RightAlt,
+    RightCtrl,
+}
+
+impl HotkeyKey {
+    pub fn key(self) -> hotkey::Key {
+        match self {
+            HotkeyKey::RightAlt => hotkey::Key::RightAlt,
+            HotkeyKey::RightCtrl => hotkey::Key::RightCtrl,
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            HotkeyKey::RightAlt => "右 Alt",
+            HotkeyKey::RightCtrl => "右 Ctrl",
+        }
+    }
+}
+
+/// 电脑本机麦克风：手机不在手边时的备选声源，默认关闭
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LocalMic {
+    pub enabled: bool,
+    /// WASAPI 端点 id；None 跟随系统默认
+    pub device: Option<String>,
+    pub hotkey: HotkeyKey,
+}
+
+impl Default for LocalMic {
+    fn default() -> Self {
+        Self { enabled: false, device: None, hotkey: HotkeyKey::RightAlt }
+    }
+}
+
+/// 配置文件与当前版本的结构一一对应：缺字段、多字段都按损坏处理，整份回到默认。
+/// 只有上一个版本（1.0.0，[`SettingsV1`]）的文件会被升级过来
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Settings {
@@ -92,6 +134,41 @@ pub struct Settings {
     pub theme: Theme,
     /// 触摸板速度倍率
     pub pointer_speed: f32,
+    /// 电脑本机麦克风（1.1.0 起）
+    pub local: LocalMic,
+}
+
+/// 1.0.0 的设置文件。只用来读：升级后第一次启动把它搬到当前结构，用户的设置不丢
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SettingsV1 {
+    channel: Channel,
+    streaming: bool,
+    live_text: bool,
+    multi: Vec<Channel>,
+    last_pick: Option<Channel>,
+    pick_counts: HashMap<Channel, u32>,
+    autostart: bool,
+    theme: Theme,
+    pointer_speed: f32,
+}
+
+impl From<SettingsV1> for Settings {
+    fn from(v: SettingsV1) -> Self {
+        let SettingsV1 { channel, streaming, live_text, multi, last_pick, pick_counts, autostart, theme, pointer_speed } = v;
+        Self {
+            channel,
+            streaming,
+            live_text,
+            multi,
+            last_pick,
+            pick_counts,
+            autostart,
+            theme,
+            pointer_speed,
+            local: LocalMic::default(),
+        }
+    }
 }
 
 /// 界面能改的那几项，只带改了的字段。
@@ -106,11 +183,13 @@ pub struct Patch {
     autostart: Option<bool>,
     theme: Option<Theme>,
     pointer_speed: Option<f32>,
+    local: Option<LocalMic>,
 }
 
 impl Patch {
     pub fn apply(self, s: &mut Settings) {
-        let Patch { channel, streaming, live_text, multi, autostart, theme, pointer_speed } = self;
+        let Patch { channel, streaming, live_text, multi, autostart, theme, pointer_speed, local } = self;
+        s.local = local.unwrap_or_else(|| std::mem::take(&mut s.local));
         s.channel = channel.unwrap_or(s.channel);
         s.streaming = streaming.unwrap_or(s.streaming);
         s.live_text = live_text.unwrap_or(s.live_text);
@@ -133,6 +212,7 @@ impl Default for Settings {
             autostart: false,
             theme: Theme::System,
             pointer_speed: 1.0,
+            local: LocalMic::default(),
         }
     }
 }
@@ -144,7 +224,7 @@ impl Settings {
     pub fn load() -> Self {
         let path = data_file(FILE);
         let mut s = match std::fs::read(&path) {
-            Ok(b) => serde_json::from_slice(&b).unwrap_or_else(|e| {
+            Ok(b) => Self::parse(&b).unwrap_or_else(|e| {
                 crate::log_warn!("设置文件无法解析，已恢复默认：{e}");
                 Self::default()
             }),
@@ -156,6 +236,11 @@ impl Settings {
         };
         s.sanitize();
         s
+    }
+
+    /// 当前结构读不懂就按 1.0.0 的读；两种都不是才算损坏，报当前结构的错
+    fn parse(b: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(b).or_else(|e| serde_json::from_slice::<SettingsV1>(b).map(Self::from).map_err(|_| e))
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -193,7 +278,7 @@ mod tests {
         s
     }
 
-    /// 不认旧格式：缺字段或带着不认识的字段都解析失败，load 会整份回到默认
+    /// 当前结构是严格的：缺字段、多字段都解析失败（1.0.0 由 parse 单独迁移，见 migrates_v1_file）
     #[test]
     fn rejects_incomplete_or_foreign_config() {
         assert!(serde_json::from_str::<Settings>(r#"{"channel":"qwen","theme":"dark"}"#).is_err());
@@ -273,5 +358,53 @@ mod tests {
     #[test]
     fn all_is_a_valid_current_channel() {
         assert_eq!(with(json!({ "channel": "all" })).channel, Channel::All);
+    }
+
+    /// 1.0.0 用户升级后设置一项不丢，本机麦克风默认关
+    #[test]
+    fn migrates_v1_file() {
+        let v1 = json!({
+            "channel": "qwen", "streaming": false, "liveText": true, "multi": ["doubao", "qwen"],
+            "lastPick": "qwen", "pickCounts": { "qwen": 4 }, "autostart": true, "theme": "dark", "pointerSpeed": 1.6,
+        });
+        let s = Settings::parse(v1.to_string().as_bytes()).unwrap();
+        assert_eq!(s.channel, Channel::Qwen);
+        assert!(!s.streaming && s.autostart);
+        assert_eq!(s.pick_counts[&Channel::Qwen], 4);
+        assert_eq!(s.pointer_speed, 1.6);
+        assert_eq!(s.local, LocalMic::default());
+        assert!(!s.local.enabled);
+    }
+
+    /// 既不是当前结构也不是 1.0.0 的：照旧按损坏处理
+    #[test]
+    fn foreign_file_is_still_rejected() {
+        let mut v = serde_json::to_value(Settings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("local");
+        v["hotkey"] = json!("F8");
+        assert!(Settings::parse(v.to_string().as_bytes()).is_err());
+        assert!(Settings::parse(b"{\"channel\":\"qwen\"}").is_err());
+    }
+
+    /// 只认右 Alt、右 Ctrl：别的键名（比如以后删掉的、手改的）按损坏处理
+    #[test]
+    fn only_right_alt_or_ctrl() {
+        let mut v = serde_json::to_value(Settings::default()).unwrap();
+        v["local"]["hotkey"] = json!("capsLock");
+        assert!(serde_json::from_value::<Settings>(v).is_err());
+    }
+
+    #[test]
+    fn local_mic_roundtrips_and_patches() {
+        let mut s = with(json!({ "local": { "enabled": true, "device": "{0.0.1}", "hotkey": "rightCtrl" } }));
+        assert_eq!(s.local.hotkey, HotkeyKey::RightCtrl);
+        let p: Patch = serde_json::from_value(json!({ "theme": "light" })).unwrap();
+        p.apply(&mut s);
+        assert!(s.local.enabled, "没带 local 的补丁不动它");
+        let p: Patch =
+            serde_json::from_value(json!({ "local": { "enabled": false, "device": null, "hotkey": "rightAlt" } }))
+                .unwrap();
+        p.apply(&mut s);
+        assert_eq!(s.local, LocalMic::default());
     }
 }

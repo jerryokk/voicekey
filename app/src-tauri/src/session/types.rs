@@ -34,8 +34,12 @@ pub struct Model<'a> {
 
 /// 会话收到的全部输入。控制器只有一个入口：`while let Some(m) = rx.recv()`。
 pub enum Msg {
-    /// 手机端事件，Press 自带本句的音频流
+    /// 声源事件（手机或电脑本机），Press 自带本句的音频流
     Remote(RemoteEvent),
+    /// 电脑本机说话时，在浮层候选里点了第几行
+    Choose(usize),
+    /// 电脑本机说话时，浮层候选出现后按了 Esc
+    Dismiss,
     /// 引擎的中间结果，带发出时的代际
     Partial { gen: u64, ch: Channel, seg: usize, text: String },
     /// 引擎的定稿结果，带发出时的代际

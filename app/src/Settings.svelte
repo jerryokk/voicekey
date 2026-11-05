@@ -7,10 +7,12 @@
   import StatusDot from "./lib/ui/StatusDot.svelte";
   import Connect from "./pages/Connect.svelte";
   import Channels from "./pages/Channels.svelte";
+  import Mic from "./pages/Mic.svelte";
   import Preferences from "./pages/Preferences.svelte";
 
   const PAGES = [
     { id: "connect", name: "连接", icon: '<rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M10.5 18.5h3"/>' },
+    { id: "mic", name: "本机", icon: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>' },
     { id: "channels", name: "渠道", icon: '<path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zM5 11a7 7 0 0 0 14 0M12 18v3"/>' },
     { id: "settings", name: "设置", icon: GEAR },
   ];
@@ -66,6 +68,7 @@
       {#if app.error}<p class="alert" role="alert">{app.error}</p>{/if}
       {#if page === "connect"}<Connect />
       {:else if page === "channels"}<Channels />
+      {:else if page === "mic"}<Mic />
       {:else}<Preferences />{/if}
     </main>
   </div>

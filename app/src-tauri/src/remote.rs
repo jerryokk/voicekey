@@ -6,10 +6,10 @@
 
 use crate::session::types::Msg;
 use crate::state::{AppState, Phase, RemoteStatus};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
-use voicekey_remote::{Config, Service};
+use voicekey_remote::{Config, Floor, Service};
 
 /// 固定端口：二维码里带的就是它，改了这个值等于换了接入点
 const PORT: u16 = 47800;
@@ -30,8 +30,13 @@ fn cloudflared() -> Result<std::path::PathBuf, String> {
     Ok(dir.join("runtime").join("tunnel").join("cloudflared.exe"))
 }
 
-async fn start() -> Result<Service, String> {
-    Service::start(Config { port: PORT, cloudflared: cloudflared()? }).await
+/// 手机发来的文件存到 Windows 的「下载」文件夹（用户改过位置也跟着走）
+fn downloads() -> Result<std::path::PathBuf, String> {
+    dirs::download_dir().ok_or_else(|| "找不到「下载」文件夹".into())
+}
+
+async fn start(floor: Arc<Floor>) -> Result<Service, String> {
+    Service::start(Config { port: PORT, cloudflared: cloudflared()?, floor, downloads: downloads()? }).await
 }
 
 /// 重新拉起服务（界面上的「重试」）
@@ -57,7 +62,8 @@ fn fail(app: &AppHandle, what: &str, e: String) {
     });
 }
 
-pub fn spawn(app: AppHandle) {
+/// `floor` 是手机与电脑本机共用的发言权；手机这边只往里面发事件，不拥有它
+pub fn spawn(app: AppHandle, floor: Arc<Floor>) {
     let (tx, mut again) = mpsc::unbounded_channel();
     if RESTART.set(tx).is_err() {
         return;
@@ -65,7 +71,7 @@ pub fn spawn(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             set_status(&app, |s| *s = RemoteStatus::STARTING);
-            let mut service = match start().await {
+            let mut service = match start(floor.clone()).await {
                 Ok(s) => s,
                 Err(e) => {
                     fail(&app, "手机接入启动失败", e);
@@ -87,12 +93,7 @@ pub fn spawn(app: AppHandle) {
                 tokio::select! {
                     // 发送端在服务里，服务活着就不会 Closed；Lagged 只是漏记了几条
                     Ok(line) = logs.recv() => crate::log_error!("手机接入：{line}"),
-                    event = service.next_event() => match event {
-                        Ok(event) => {
-                            let _ = app.state::<AppState>().tx.send(Msg::Remote(event));
-                        }
-                        Err(reason) => break Some(reason),
-                    },
+                    reason = service.exited() => break Some(reason),
                     Ok(()) = devices.changed() => {
                         let n = *devices.borrow_and_update();
                         crate::ui::tray_devices(&app, n);

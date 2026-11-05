@@ -2,148 +2,158 @@
 
 <h1 align="center">VoiceKey</h1>
 
-<p align="center">Windows 上的语音输入：手机当麦克风。手机扫码，按住说话，文字打进电脑当前光标处。</p>
+<p align="center">Windows 上的语音输入：按住说话，文字打进电脑当前光标处。<br>手机扫码当麦克风和触摸板，也能直接用电脑的麦克风。</p>
 
-## 为什么是手机
+## 功能
 
-笔记本内置麦克风离嘴远，键盘声和风扇声都在里面；手机是阵列麦、离嘴近，还自带降噪。把收音放在手机上，识别准确率明显更好，也不用抢电脑的音频设备。
+- **手机当麦克风**：扫码即用，不装 App。笔记本麦克风离嘴远、混着键盘和风扇声，手机离嘴近、自带降噪，识别明显更准
+- **手机当触摸板**：不用回到电脑前，在手机上挪光标、点击、滚动
+- **本机麦克风**（可选）：手机不在手边时，按住右 Alt 说话
+- **发到电脑**：手机上的剪贴板、文字、图片、文件一键发到电脑
+- **八个识别渠道**：豆包、微信、千问、百度、搜狗、讯飞、Chatterfly 七家云端，外加完全本地的微信离线（约 100MB，断网可用）；「多渠道」同时跑几家，说完挑一条
+- 麦克风只在按住时打开，松手即关
 
-## 怎么用
+## 使用
 
-1. 左键点托盘图标，弹出扫码面板：二维码、在线手机数、识别渠道都在这里，点一个渠道即切换
-2. 手机扫码，点「启用麦克风」（浏览器会问一次权限）
-3. 手机上半部分是触摸板，用它把电脑光标挪到要输入的地方点一下
-4. 按住下方按钮说话，松手后文字自动打进去
-5. 说错了：按住时往上滑，按钮变红再松手，这一句直接丢弃
-6. 想删字用左边的退格键：单击删一个字，按住连续删
+### 手机
 
-托盘右键只有「打开 VoiceKey」（完整设置）和「退出」。选「多渠道」时，说完手机会列出各家的结果，点一条上屏。
+1. 左键点托盘图标，弹出扫码面板（二维码、在线手机数、识别渠道都在这里）
+2. 手机扫码，点「启用麦克风」，浏览器会问一次权限
+3. 用手机上半部分的触摸板把光标挪到要输入的地方，点一下
+4. 按住下方按钮说话，松手文字自动打进去
+   - 说错了：按住时往上滑，按钮变红再松手，这一句丢弃
+   - 删字：左边的退格键，单击删一个，按住连删
 
-### 触摸板
+电脑重启后地址会变，手机页断线一会儿就会露出「扫码」按钮，直接调起相机扫新码。
 
-| 手势 | 效果 |
+| 触摸板手势 | 效果 |
 |---|---|
 | 单指滑动 | 移动光标，划得越快走得越远 |
-| 轻点 | 左键单击；连点两下是双击 |
-| 轻点一下，紧接着按住再滑 | 按住左键拖拽（和笔记本触摸板一样），手机轻震一下表示进入，抬手松开。单击因此会晚约 0.2 秒发出 |
+| 轻点 / 连点两下 | 单击 / 双击 |
+| 轻点一下，紧接着按住再滑 | 拖拽（手机轻震表示进入，抬手松开）。单击因此晚约 0.2 秒发出 |
 | 双指轻点 / 三指轻点 | 右键 / 中键 |
 | 双指滑动 | 滚动（自然方向），松手带惯性 |
 
-位移按「电脑屏幕宽的比例」传输：手机不知道电脑分辨率，电脑端按光标所在显示器换算像素，所以同一划在 1080p 和 4K 上走过的视觉距离相同。速度倍率在设置里调（0.4–2.5×）。
+位移按电脑屏幕宽的比例换算，同一划在 1080p 和 4K 上走过的视觉距离相同；速度在设置里调（0.4–2.5×）。
 
-## 端到端怎么走
+### 本机麦克风
+
+在设置窗的「本机」页打开。按住**右 Alt**（可改右 Ctrl）说话，松开识别；按住时按 Esc 取消，轻点不会触发。多渠道的候选出现在屏幕底部的浮层里，点一条上屏。
+
+它不经过网络通道，打开 VoiceKey 就能用。手机和本机同一时间只能有一方在说，另一方按下会提示稍等。
+
+### 发到电脑
+
+手机页右上角的按钮：发剪贴板、文字、图片或文件。电脑右下角弹出收件面板，不抢输入框的焦点：
+
+- 剪贴板：直接写进电脑剪贴板，几秒后自动收起
+- 文字：点「复制」
+- 图片、文件：存进「下载」文件夹，点「在文件夹中显示」
+
+关掉的卡片在连接页「最近收到」里还能找回，退出即清空。
+
+### 托盘
+
+左键扫码面板，右键「打开 VoiceKey」（完整设置：连接 / 本机 / 渠道 / 设置）和「退出」。
+
+## 隐私与安全
+
+- 二维码里的地址等同于「能往这台电脑输入文字」的凭证，别外传、别截图发群里。地址每次启动都会变；「断开手机」让旧码立即失效
+- 音频、触摸板、发到电脑的内容都走 WebRTC 直连（端到端加密），Cloudflare 隧道只承载页面与信令
+- 云端渠道会把语音发给对应厂商；选微信离线时音频不出本机
+- 收到的文件只会落在「下载」文件夹本身，带「来自网络」标记，电脑端从不自动打开
+
+## 工作原理
 
 ```
-手机浏览器 ──WSS──▶ Cloudflare 隧道 ──▶ 本机 127.0.0.1:47800
-    │                                        │
-    └── SRTP/UDP 直连 ──▶ 本机 WebRTC 接收 ──┴──▶ 识别引擎 ──▶ 打进前台窗口
+手机浏览器 ──WSS──▶ Cloudflare 隧道 ──▶ 127.0.0.1:47800（页面、信令）
+    │
+    └──── WebRTC 直连 ─────▶ 音频 / 触摸板 / 发到电脑 ──┐
+                                                       ├──▶ 识别引擎 ──▶ 前台窗口
+本机麦克风（WASAPI）+ 右 Alt 键盘钩子 ─────────────────┘
 ```
 
-- 页面必须走 https：浏览器只在安全上下文里给麦克风权限。这就是需要隧道的原因，哪怕手机和电脑在同一个 WiFi
-- 音频（Opus 音轨）与触摸板（DataChannel `input`，有序可靠）都走 WebRTC 直连；隧道只承载页面与信令。直连建不起来时按钮不可用，页面会自动重建
-- 音轨一直开着，电脑端平时只保留最近 0.5 秒作为预录：按下那一刻之前的字头不会被吃掉
-
-## 识别渠道
-
-豆包、微信、千问、百度、搜狗、讯飞、Chatterfly 七家云端识别，外加完全本地的微信离线（约 100MB，本机推理，断网可用，音频不外传）。
+- **为什么要隧道**：浏览器只在 https 下给麦克风权限，同一个 WiFi 也绕不过去
+- **直连提前建好**：ICE 与 DTLS 握手要几百毫秒，页面就绪就建。音频通道先空着，按下才打开麦克风换进去（`replaceTrack`，不重新协商），松手摘下关掉
+- **不吃字头**：每个声源一个 `Inbox`，空闲时保留最近 0.5 秒。手机的 `start` 绕隧道、常比直连的声音晚到；本机要按满 250ms 才算一句。这段声音都接进这一句
+- **一个会话**：识别会话全局唯一，由发言权 `Floor` 仲裁（手机连接从 1 编号，本机是 `LOCAL`）。结束一句的一方先发结束事件再交还，下一位的 Press 一定排在后面
+- **上屏**：粘到当前前台，不切窗口。流式上屏用退格 + 补打（`Typer`），定稿走剪贴板 + Ctrl+V 并还原剪贴板。管理员窗口收不到模拟输入，这时正文留在剪贴板并明说
 
 ## 从源码构建
 
-需要 Rust（stable）、Node 22+、MSVC 生成工具。libopus 是仓库里预编译好的静态库，构建链只有 rustc、MSVC linker 和 node，没有 cmake、bindgen、pkg-config。
+需要 Rust（stable）、Node 22+、MSVC 生成工具。libopus 是仓库里预编译的静态库，不需要 cmake、bindgen、pkg-config。
 
 ```bash
-# cloudflared 放这里（不进 git，CI 会下载）
+# cloudflared 不进 git，先下载到这里（CI 会自动下载）
 mkdir -p app/src-tauri/binaries
 curl -fL -o app/src-tauri/binaries/cloudflared.exe \
   https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe
 
-cd app
-npm ci
-npm run tauri -- dev                          # 开发：vite 热更新
-npm run tauri -- build                       # 安装包：target/release/bundle/{msi,nsis}
-npm run tauri -- build --bundles msi         # 只出 msi（本机缺 NSIS 工具链时用这个）
+cd app && npm ci
+npm run tauri -- dev                     # 开发，vite 热更新
+npm run tauri -- build                   # 安装包：target/release/bundle/{msi,nsis}
+npm run tauri -- build --bundles msi     # 只出 msi（缺 NSIS 工具链时）
 ```
 
-界面在编译期嵌进 exe，所以不打安装包时也要先 `npm run build` 再 `cargo build`（`cargo test` 同理）：
+界面在编译期嵌进 exe，直接用 cargo 时先构建前端（`cargo test` 同理）：
 
 ```bash
 cd app && npm run build && cd ..
-cargo build              # target/debug/voicekey.exe，双击即用
 cargo build --release    # target/release/voicekey.exe
 ```
 
-cloudflared 只认一个位置：`voicekey.exe` 同级的 `runtime\tunnel\cloudflared.exe`。安装版、绿色版、`cargo build` 产物都是这个结构（tauri-build 会把资源拷到 `target/<profile>/runtime/tunnel`）。找不到就是启动失败，扫码面板会显示原因和「重试」。
-
-也可以用脚本一步完成前端构建和 release 编译，加 `-Package` 再打免安装包（版本号取自 `tauri.conf.json`）：
+免安装包（版本号取自 `tauri.conf.json`，CI 发布用同一个脚本）：
 
 ```powershell
-.\scripts\build.ps1            # 只编译：target\release\voicekey.exe
-.\scripts\build.ps1 -Package   # 再打包：dist\VoiceKey-<版本>-x64-portable.zip，发给别人解压即用
+.\scripts\build.ps1            # 只编译
+.\scripts\build.ps1 -Package   # 再打包：dist\VoiceKey-<版本>-x64-portable.zip
 ```
 
-打包由 `scripts\package.ps1` 完成，CI 打 tag 发布时用的是同一个脚本，zip 结构与本地一致（CI 里的 cloudflared 是构建时下载的最新版）。
+cloudflared 只认 `voicekey.exe` 同级的 `runtime\tunnel\cloudflared.exe`，安装版、绿色版、`cargo build` 产物都是这个结构。找不到时扫码面板显示原因和「重试」。
 
-## 测试与联调
+版本号写在根 `Cargo.toml` 与 `tauri.conf.json`，CI 要求两者与 tag 一致。
+
+## 测试
 
 ```bash
-cargo test --workspace             # 58 项：协议↔手机页字段对账、Opus 往返、音频分帧与预录、
-                                   # 隧道地址解析、token、指针余量、会话状态机、设置校验
+cargo test --workspace     # 84 项
 ```
 
-不用手机也能验证识别链路（WAV 需 16kHz 单声道）：
+覆盖协议与手机页字段对账、Opus 往返、音频分帧与预录、会话状态机、发言权、快捷键状态机、收文件（文件名清洗、重名、中断清理、限额）、设置校验与 1.0 迁移等。
+
+不用手机验证识别链路（WAV 需 16kHz 单声道），以及离线模型联调：
 
 ```bash
 cargo run -p voicekey-core --bin vk-test -- doubao|wetype|qwen|baidu|sogou|iflytek|chatterfly file.wav
+cargo run -p voicekey-wtlocal --bin wtl -- --unpack pack.apk 模型目录   # 解包官方语音包
+cargo run -p voicekey-wtlocal --bin wtl -- 模型目录 a.wav b.wav         # 逐文件计时，--live 按实时推流
 ```
 
-离线模型联调（解包官方语音包 / 逐文件计时 / `--live` 按实时节奏推流）：
-
-```bash
-cargo run -p voicekey-wtlocal --bin wtl -- --unpack pack.apk 模型目录
-cargo run -p voicekey-wtlocal --bin wtl -- 模型目录 a.wav b.wav
-```
-
-## 架构
+## 代码结构
 
 | 路径 | 内容 |
 |---|---|
-| `crates/core` | 七家厂商的识别协议、音频分帧与 Opus 编码（发云端编码、收手机解码共用一份 FFI） |
-| `crates/remote` | 手机接入：本地服务、WS 信令、WebRTC 收流与解码、Cloudflare 隧道、手机页 |
-| `crates/platform` | 上屏（剪贴板 + Ctrl+V）、边说边上屏的 `Typer`、触摸板的 `Pointer`（SendInput 绝对坐标） |
+| `crates/core` | 各厂商识别协议、音频分帧与预录（`Inbox` / `pump`）、Opus |
+| `crates/remote` | 手机接入：本地服务、信令、WebRTC 收流、发言权 `Floor`、发到电脑（`xfer`）、隧道、手机页 |
+| `crates/platform` | 上屏与 `Typer`、触摸板 `Pointer`、本机麦克风、键盘钩子、资源管理器与窗口工具 |
 | `crates/wtlocal` | 微信离线：解析官方模型、纯 Rust 推理 |
 | `crates/opus-sys` | libopus 预编译静态库 + 最小 FFI |
-| `app/src-tauri` | 会话状态机、托盘、浮层、设置、离线模型管理 |
+| `app/src-tauri` | 会话状态机、本机声源、收件、托盘、浮层、设置 |
 | `app/src` | Svelte 界面 |
-| `app/src-tauri/icons` | 图标，`logo.py` 一次生成全部尺寸 |
-| `scripts` | `build.ps1` release 构建（`-Package` 顺带打包）、`package.ps1` 打免安装 zip |
+| `scripts` | release 构建与打包 |
 
-每个连接一个 `Inbox`，WebRTC 解出的 16k 样本写进去；按下后泵每 10ms 取整帧（20ms 一帧）送引擎。
+`crates/remote/src/protocol.rs` 是手机页与电脑的唯一契约，手机发来的消息都 `deny_unknown_fields`；`page_agrees_with_protocol` 测试保证页面里的名字与 Rust 枚举一致，任何一边改名 `cargo test` 直接失败。
 
-会话是一个纯状态机，输入统一为 `Msg`：
+### 实现要点
 
-- 手机端事件：`Press / Release / Cancel / Abort / Commit / Erase / Pad / Gone`，Press 附带本句音频流；`Gone` 时替断开的设备放开按住的鼠标键
-- `Mode: Idle / Single(ch) / Pick`（多渠道候选）；识别中再按一次是「接着说」，各段按顺序拼接
-- 迟到的引擎结果靠代际票根作废；松手后 15 秒超时按断线处理，已识别的文字保留
-- 时序要点：服务端**先停泵、再发 Release**，controller 收到时音频已结束；`Cancel` 则停泵后不发 Release，什么都不产出，流式已打出的字要退回
-- 多设备：识别会话全局唯一，忙时新设备收到 `busy`。有人在说话时只有说话的那台能动鼠标、退格；候选只能由最后说话的那台来选，它断开后谁都能选
-
-`crates/remote/src/protocol.rs` 是手机页与电脑之间的唯一契约（WS 上的 `Op`/`Out`，DataChannel 上的 `Pad`），手机发来的 `Op`、`Pad` 都 `deny_unknown_fields`。`page_agrees_with_protocol` 测试保证页面里的名字和 Rust 枚举一致——任何一边改名，`cargo test` 直接失败。
-
-## 实现要点
-
-- **cloudflared 绑在 kill-on-close 的作业对象里**：voicekey 无论正常退出、崩溃还是被强杀，内核都会带走它启动的那个 cloudflared，且不影响机器上其他 cloudflared 实例
-- **上屏不切窗口**：粘到当前前台。高权限窗口收不到模拟输入，这时正文留在剪贴板并在手机与浮层明说，让用户自己 Ctrl+V
-- 流式 `Typer`（退格 + 补打）与一次性 `paste` 是两条路径，开流式时不走剪贴板；外部退格会让 Typer 失准，所以流式上屏进行中电脑忽略手机发来的退格；手机页在录音中也不让按退格
-- cloudflared 启动参数不能省：`--protocol auto`（屏蔽 UDP 的网络起不来）、metrics 绑 `127.0.0.1:0`（第二个实例抢端口）、stdout 与 stderr 都要读（只读一个会卡死）；从日志抠域名时要求行内含连字符，避免把 `api.trycloudflare.com` 当地址
-- 端口固定 47800；token 128 位放在 URL 里，WS 与信令都校验；服务只绑 `127.0.0.1`，只有 cloudflared 能进
-- 版本 1.0.0，写在根 `Cargo.toml` 与 `tauri.conf.json`；CI 要求这两处与 tag 三者一致，不一致直接失败
-- 设置文件与当前结构一一对应（`deny_unknown_fields`，无默认字段）：缺字段、多字段都按损坏处理，整份回到默认；`sanitize()` 只收拢越界值
-
-## 安全
-
-- 二维码里的地址等同于「能往这台电脑输入文字」的凭证，别外传、别截图发群里
-- 地址每次启动都会变，重启后需要重新扫码。手机页能直接调起相机扫新码（相机画面交给 Worker 里的 jsQR 解码，不依赖多数手机浏览器都没有的 BarcodeDetector；解码库在连上电脑时就取回，旧地址失效后照样能扫，没取到时提示改用手机相机扫；只认本服务的地址）；电脑主动断开时整页提示扫码，断线超过 4 秒时状态栏露出「扫码」小按钮，同时继续重连
-- 音频经 Cloudflare 到本机，再由本机发给所选识别厂商；选微信离线时不出本机
+- **会话**：纯状态机，`Mode: Idle / Single / Pick`。识别中再按一次是「接着说」；迟到的引擎结果靠代际票根作废；松手 15 秒没定稿按断线处理，已识别的文字保留。声源先停泵再发 Release；`Cancel` 不产出任何东西，流式已打出的字退回
+- **多设备**：有人在说话时只有说话的那台能动鼠标、退格；候选归最后说话的一方，进度也只告诉它
+- **键盘钩子**：`WH_KEYBOARD_LL` 吞掉选中的键，否则单按 Alt 会激活菜单栏、补打的字会变成 Alt 组合键。AltGr 合成的左 Ctrl 一并吞掉；注入的键不认；按不满 250ms 算误触；锁屏、UAC 时收不到松开，按松开处理
+- **收文件**：先写 `.part` 收完再改名，断线 / 取消即删；文件名清洗（只取最后一段、非法字符、保留名、限长保扩展名），重名按 `名字 (1).扩展名` 编号；写 `Zone.Identifier`；单文件 2GB、文字 1MB，磁盘余量不够直接拒绝
+- **不抢焦点的窗口**：收件面板与浮层用 `SW_SHOWNOACTIVATE` 弹出。窗口本身仍可激活，否则 WebView2 吞掉第一下点击；点浮层候选上屏前先把焦点还回去
+- **cloudflared**：绑在 kill-on-close 作业对象里，VoiceKey 崩溃、被强杀也会带走它；`--protocol auto`（屏蔽 UDP 的网络）、metrics 绑 `127.0.0.1:0`（多实例抢端口）、stdout 与 stderr 都要读（只读一个会卡死）
+- **本地服务**：端口 47800，只绑 `127.0.0.1`；URL 里的 128 位 token 在 WS 与信令上都校验
+- **设置**：与当前结构严格对应（`deny_unknown_fields`），损坏就整份回到默认；1.0.0 的文件自动迁移
 
 ## 声明
 

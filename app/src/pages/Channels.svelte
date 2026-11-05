@@ -87,7 +87,7 @@
     {advanced ? "收起高级" : "高级：多渠道对比"}
   </button>
   {#if advanced}
-    <Card sub="同时跑多个渠道，说完在手机上挑一条上屏">
+    <Card sub="同时跑多个渠道，说完挑一条上屏">
       <div class="chips">
         {#each engines as c}
           {@const on = s.multi.includes(c)}
@@ -98,7 +98,7 @@
         {/each}
         <span class="cnt">已选 {s.multi.length} 个</span>
       </div>
-      <p class="hint">改动勾选会把「多渠道」设为当前渠道，说完后手机上会出现候选列表。</p>
+      <p class="hint">改动勾选会把「多渠道」设为当前渠道，说完后手机上（本机说话时在屏幕底部浮层上）会出现候选列表。</p>
     </Card>
   {/if}
 </div>

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { app, disconnect, retry, link } from "../lib/store.svelte";
-  import { CH } from "../lib/api";
+  import { app, disconnect, retry, link, fail } from "../lib/store.svelte";
+  import { CH, invoke, hotkeyName, fileSize, type InboxCard } from "../lib/api";
   import Card from "../lib/ui/Card.svelte";
   import StatusDot from "../lib/ui/StatusDot.svelte";
 
@@ -45,6 +45,18 @@
     return `${Math.floor(s / 3600)} 小时前`;
   }
 
+  function kindName(c: InboxCard) {
+    if (c.kind === "clip") return "剪贴板";
+    if (c.kind === "text") return "文字";
+    return c.files.length === 1 && c.files[0].thumb ? "图片" : "文件";
+  }
+
+  function summary(c: InboxCard) {
+    if (c.kind !== "files") return c.text.replace(/\s+/g, " ");
+    const total = c.files.reduce((n, f) => n + f.size, 0);
+    return c.files.length === 1 ? `${c.files[0].name} · ${fileSize(total)}` : `${c.files.length} 个文件 · ${fileSize(total)}`;
+  }
+
   const clock = $derived(
     last ? new Date(last.at * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "",
   );
@@ -57,7 +69,15 @@
   <div class="head">
     <StatusDot state={status.dot} pulse={status.dot === "busy"} />
     <b>{status.text}</b>
-    {#if app.s}<span class="pill">{CH[app.s.channel].short}</span>{/if}
+    {#if app.s}
+      <span class="gap"></span>
+      {#if app.s.local.enabled}
+        <span class="pill local" class:bad={app.local.state === "error"} title={app.local.error ?? ""}>
+          本机 · {app.local.state === "error" ? "不可用" : hotkeyName(app.s.local.hotkey)}
+        </span>
+      {/if}
+      <span class="pill">{CH[app.s.channel].short}</span>
+    {/if}
   </div>
   <p class="detail">
     {#if failed}
@@ -102,6 +122,25 @@
   </Card>
 {/if}
 
+{#if app.inbox.length}
+  <Card title="最近收到" sub="手机发来的内容，只保留在内存里，退出后清空">
+    <ul class="recv">
+      {#each app.inbox as c (c.id)}
+        <li>
+          <span class="kind">{kindName(c)}</span>
+          <span class="what" title={summary(c)}>{summary(c)}</span>
+          <span class="when">{ago(c.at, now)}</span>
+          {#if c.kind === "files"}
+            <button class="btn" disabled={c.files.every((f) => f.gone)} onclick={() => invoke("inbox_reveal", { id: c.id }).catch(fail)}>打开位置</button>
+          {:else}
+            <button class="btn" onclick={() => invoke("inbox_copy", { id: c.id }).catch(fail)}>复制</button>
+          {/if}
+        </li>
+      {/each}
+    </ul>
+  </Card>
+{/if}
+
 <Card title="怎么用">
   <ol class="steps">
     <li><b>扫码</b><span>手机相机对准二维码</span></li>
@@ -118,11 +157,22 @@
   }
   .head { display: flex; align-items: center; gap: 8px; }
   .head b { font-size: 14px; font-weight: 500; }
+  .gap { flex: 1; }
   .pill {
-    margin-left: auto; font-size: var(--fs-tag); color: var(--fg-2);
+    font-size: var(--fs-tag); color: var(--fg-2);
     border: 1px solid var(--line-2); border-radius: var(--r-pill); padding: 1px 9px;
   }
+  .pill.local { color: var(--fg-2); }
+  .pill.local + .pill { margin-left: 6px; }
+  .pill.local.bad { color: var(--err); border-color: color-mix(in srgb, var(--err) 35%, transparent); }
   .detail { margin: 6px 0 0; font-size: var(--fs-sub); color: var(--fg-2); line-height: 1.7; }
+  .recv { list-style: none; padding: 4px 0 12px; display: flex; flex-direction: column; }
+  .recv li { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); font-size: var(--fs-sub); }
+  .recv li:first-child { border-top: 0; }
+  .recv .kind { flex: none; width: 44px; color: var(--fg-3); font-size: var(--fs-tag); }
+  .recv .what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .recv .when { flex: none; color: var(--fg-3); font-size: var(--fs-tag); }
+  .recv .btn { min-height: 26px; padding: 3px 10px; font-size: var(--fs-tag); }
 
   .qrWrap { display: flex; gap: 18px; padding: 10px 0 14px; align-items: center; }
   .qr { background: #fff; border: 1px solid var(--line); border-radius: var(--r-md); padding: 10px; flex: none; }
